@@ -39,11 +39,6 @@ This Streamlit app helps you explore publications from the OpenAlex database for
 
 All data is downloaded to your machine. The cache file `cache.sqlite3` lives beside the scripts and is ignored by git. You can delete it at any time to force a fresh fetch.
 
-## Troubleshooting
-
-- **Enter key doesn’t trigger search**: The institution search field is wrapped in a form; hitting Enter should now submit. If it doesn’t, click “Search ROR registry.”
-- **Excel download missing**: The app writes Excel files locally and doesn’t need `openpyxl`. Make sure you have run a fetch; the button appears only when data exists.
-- **No WAL files**: SQLite creates `cache.sqlite3-wal` and `cache.sqlite3-shm` only after a write occurs. If you delete them and run the app, they’ll reappear during the next fetch.
-- **API errors**: Network hiccups or rate limits might pop up as Streamlit errors. Try again later or reduce the record limit.
+---
 
 Enjoy exploring how your institution’s publications map to the Sustainable Development Goals!
