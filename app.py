@@ -203,7 +203,10 @@ def render_sdg_pie_chart(data: List[Tuple[str, float]], title: str):
             theta="Value",
             color=alt.Color("SDG")
             .legend(columns=1, labelLimit=300, titleLimit=300, title="Sustainable Development Goals"),
-        tooltip=[alt.Tooltip("SDG"), alt.Tooltip("Value", format=".1f", title="Value (%)")],
+            tooltip=[
+                alt.Tooltip("SDG", title="Sustainable Development Goal"),
+                alt.Tooltip("Value", format=".1f", title="Concordance in %"),
+            ],
         )
         .properties(width=1650, height=450, title=title)
     )
@@ -691,7 +694,7 @@ def main():
                 ),
             },
         )
-        st.caption("Select a publication below (0 = All).")
+        st.caption(f"Showing page {current_page} of {total_pages}.")
         dropdown_options = ["0 — All publications"]
         for idx, row in enumerate(all_rows):
             title_preview = (row.get("title") or row.get("display_name") or "(no title)")[:80]
@@ -719,8 +722,7 @@ def main():
             chart_rows = all_rows
             selected_index = None
             selected_title = None
-
-        st.caption(f"Showing page {current_page} of {total_pages}. Use the slider to inspect SDGs per publication.")
+        st.caption("Select a publication above (0 = All).")
     else:
         st.session_state["preview_page"] = 1
         st.info("No preview rows available.")
@@ -748,10 +750,6 @@ def main():
         data=csv_bytes,
         file_name=filename,
         mime="text/csv",
-    )
-
-    st.caption(
-        "Tip: rerun with model='skip' if you only need metadata, or use a smaller limit first to check the configuration."
     )
 
 
