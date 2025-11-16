@@ -333,8 +333,8 @@ def rows_to_excel_bytes(rows: List[Dict[str, Any]], columns: Optional[List[str]]
 
 
 def render_institution_selector(user_agent: str) -> Optional[str]:
-    st.header("Query setup", divider="violet")
-    st.subheader("1. Institution", divider="blue")
+    st.header("Query setup", divider="rainbow")
+    st.subheader("1. Institution", divider="violet")
 
     with st.form("institution_search_form", clear_on_submit=False):
         search_query = st.text_input(
@@ -390,7 +390,7 @@ def render_institution_selector(user_agent: str) -> Optional[str]:
 
 
 def render_publication_type_selector() -> Optional[str]:
-    st.subheader("2. Publication type", divider="green")
+    st.subheader("2. Publication type", divider="blue")
     types = [
         "article",
         "book",
@@ -412,7 +412,7 @@ def render_publication_type_selector() -> Optional[str]:
 
 
 def render_model_selector() -> str:
-    st.subheader("3. SDG classifier", divider="yellow")
+    st.subheader("3. SDG classifier", divider="green")
     labels = [f"{name} — {desc}" for name, desc in AURORA_MODELS]
     default_index = next((i for i, (name, _) in enumerate(AURORA_MODELS) if name == "aurora-sdg-multi"), 0)
     selection = st.selectbox("Choose a model", labels, index=default_index)
@@ -423,7 +423,7 @@ def render_advanced_options(
     semantic_key_from_secret: Optional[str],
     default_from_secret: Optional[str],
 ) -> Tuple[str, str, Optional[int]]:
-    st.subheader("4. Advanced options", divider="orange")
+    st.subheader("4. Advanced options", divider="yellow")
     today = datetime.today().date().replace(day=1)
     start_str = default_from_secret or "2023-01-01"
     try:
@@ -511,7 +511,7 @@ def main():
         st.error("The ROR value must look like https://ror.org/XXXXXXXXX.")
         return
     
-    st.header("Run query and download results", divider="red")
+    st.header("Run query and download results", divider="rainbow")
 
     current_params = {
         "ror": ror_url,
@@ -620,7 +620,7 @@ def main():
     chart_rows: List[Dict[str, Any]] = all_rows
     selected_title: Optional[str] = None
     if preview_rows:
-        st.subheader("Preview")
+        st.subheader("Preview", divider="orange")
         st.markdown(RADIO_CHECKBOX_CSS, unsafe_allow_html=True)
         preview_df = pd.DataFrame(preview_rows)
         preview_df.insert(0, "Focus", focus_mask)
@@ -633,9 +633,18 @@ def main():
                     "Focus",
                     help="Behaves like a radio button: only one selection is used.",
                     default=False,
-                )
+                ),
+                "openalex_id": st.column_config.LinkColumn(
+                    "OpenAlex ID",
+                    help="Open the work in OpenAlex",
+                    display_text=r"(?:https?://openalex\.org/)?(.+)",
+                ),
+                "doi": st.column_config.LinkColumn(
+                    "DOI",
+                    help="Open this DOI in a new tab",
+                    display_text=r"(?:https?://(?:dx\.)?doi\.org/)?(.+)",
+                ),
             },
-            key="preview_table",
         )
         edited_df = pd.DataFrame(edited_df)
         new_mask = [bool(flag) for flag in edited_df["Focus"]]
@@ -665,12 +674,13 @@ def main():
         st.info("No preview rows available.")
 
     chart_data = aggregate_sdg_counts(chart_rows)
-    st.subheader("SDG distribution")
+    st.subheader("SDG distribution", divider="red")
     chart_title = "selected publication" if len(chart_rows) == 1 else "all publications"
     if chart_title == "selected publication" and selected_title:
         chart_title = f"selected publication '{selected_title}'"
     render_sdg_pie_chart(chart_data, f"SDGs in {chart_title}")
 
+    st.subheader("Download data sets", divider="gray")
     export_rows = rows or all_rows
     excel_bytes = rows_to_excel_bytes(export_rows, CSV_FIELDNAMES) if export_rows else None
     if excel_bytes:
