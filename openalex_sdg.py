@@ -458,9 +458,10 @@ def fetch_works_with_sdg(
             upsert_work(row_data, raw_record=work)
             authors_preview = abbreviate_authors(authors_str)
             title_display = title if len(title) <= 120 else f"{title[:117]}..."
-            label = f"Processed {title_display or openalex_id}"
+            label = f"Processed: "
             if authors_preview:
-                label += f" — {authors_preview}"
+                label += f"{authors_preview}, "
+            label += f"{title_display or openalex_id}"
             if reused_sdg:
                 label += " (cached SDG)"
             emit_progress(label)
