@@ -1,0 +1,49 @@
+# Aurora SDG Publication Classifier
+
+This Streamlit app helps you explore publications from the OpenAlex database for any ROR (Research Organization Registry) institution. It pulls the metadata, runs them through Aurora’s Sustainable Development Goals (SDG) classifiers, and gives you immediate visual and downloadable results that you can take into Excel or other tools.
+
+## What you can do
+
+- **Search institutions**: Enter a name or paste a ROR URL (e.g. `https://ror.org/02msan859`). The built-in search talks to the ROR registry and keeps results handy so you do not have to re-run the query every time.
+- **Set filters**: Choose publication types, SDG classifier models, time windows (month-by-month slider), and optional record limits if you want a quick test run.
+- **Fetch SDG predictions**: The app call OpenAlex for metadata and Aurora for SDG scores. Missing abstracts are fetched from Semantic Scholar when possible, and everything is cached locally in `cache.sqlite3` to avoid redundant network calls.
+- **Inspect results instantly**: The “Preview” section shows the first 25 rows with friendly author/institution details. You can select one row to focus the SDG chart on that single publication.
+- **Visualize SDG coverage**: The pie ring chart aggregates SDG scores across all rows or the selected publication.
+- **Export data**: Download either a CSV or Excel file (with no external dependencies) for the entire result set.
+
+## How it works in the background
+
+1. **OpenAlex fetch**: We request the Works API using your selected ROR, date range, and publication type. The request uses a friendly User-Agent (set via `.streamlit/secrets.toml`) to comply with API guidelines.
+2. **Caching**: Each returned record and SDG classification is stored in a local SQLite database (`cache.sqlite3`). When you rerun the query, previously fetched publications are loaded from the cache, so the Aurora SDG API is only contacted for new or uncached works. The cache runs in WAL mode for safe concurrent access.
+3. **SDG classification**: Depending on the model you pick (“aurora-sdg”, “aurora-sdg-multi”, “elsevier-sdg-multi”, “osdg”, or “skip”), abstracts or titles are sent to the relevant Aurora endpoint. Short abstracts are skipped when the model requires a minimum length (e.g., the OSDG model).
+4. **Semantic Scholar fallback**: If OpenAlex provides no abstract but a DOI, we request the same DOI via the Semantic Scholar API (optional API key configured via secrets). Those abstracts are cached too.
+5. **Preview**: The Streamlit UI converts the cached data into a small DataFrame. OpenAlex IDs and DOIs are shown as clickable links; the selection checkbox behaves like a radio button so only one item is highlighted at a time.
+6. **Exports**: A custom lightweight Excel writer assembles `.xlsx` files without additional libraries, ensuring easy downloads even in bare environments.
+
+## Getting started
+
+1. **Install dependencies**: `pip install -r requirements.txt` (Streamlit, pandas, requests, Altair).
+2. **Configure secrets**: Create `.streamlit/secrets.toml` with at least an `http_user_agent`. Optional keys let you set a default start date and a Semantic Scholar API key.
+3. **Run the app**: `streamlit run app.py` from the project directory.
+4. **Use the interface**: Search or paste a ROR, choose options, and press “Fetch works and build CSV.” Progress bars show how many works have been processed.
+5. **Download your data**: After the fetch completes you’ll see the chart, preview, and buttons for Excel/CSV downloads.
+
+## Notes for non-technical users
+
+- The app tries to minimize API calls by caching results. If you wonder why a second run finishes faster, it’s reusing the stored data.
+- CSV downloads are great for import into statistical packages. Excel downloads open directly in Microsoft Excel or LibreOffice.
+- If you change parameters (date range, SDG model, etc.), remember to press the fetch button again to refresh the data.
+- OpenAlex and Aurora APIs may throttle large requests. Start with a modest limit (e.g., 200 works) to validate your settings before removing the limit.
+
+## Privacy and data location
+
+All data is downloaded to your machine. The cache file `cache.sqlite3` lives beside the scripts and is ignored by git. You can delete it at any time to force a fresh fetch.
+
+## Troubleshooting
+
+- **Enter key doesn’t trigger search**: The institution search field is wrapped in a form; hitting Enter should now submit. If it doesn’t, click “Search ROR registry.”
+- **Excel download missing**: The app writes Excel files locally and doesn’t need `openpyxl`. Make sure you have run a fetch; the button appears only when data exists.
+- **No WAL files**: SQLite creates `cache.sqlite3-wal` and `cache.sqlite3-shm` only after a write occurs. If you delete them and run the app, they’ll reappear during the next fetch.
+- **API errors**: Network hiccups or rate limits might pop up as Streamlit errors. Try again later or reduce the record limit.
+
+Enjoy exploring how your institution’s publications map to the Sustainable Development Goals!
