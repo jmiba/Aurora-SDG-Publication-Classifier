@@ -107,12 +107,17 @@ def flatten_authors_and_institutions(authorships: Sequence[dict]) -> Tuple[str, 
     return "; ".join(author_names), "; ".join(inst_names)
 
 
-def make_filter(ror_url: str, from_date: str, work_type: Optional[str]) -> str:
+def make_filter(
+    ror_url: str, from_date: Optional[str], work_type: Optional[str], to_date: Optional[str] = None
+) -> str:
     parts = [
         f"institutions.ror:{ror_url}",
         "is_paratext:false",
-        f"from_publication_date:{from_date}",
     ]
+    if from_date:
+        parts.append(f"from_publication_date:{from_date}")
+    if to_date:
+        parts.append(f"to_publication_date:{to_date}")
     if work_type:
         parts.append(f"type:{work_type}")
     return ",".join(parts)
@@ -291,14 +296,15 @@ def fetch_works_with_sdg(
     from_date: str,
     work_type: Optional[str],
     model: str,
+    to_date: Optional[str] = None,
     limit_rows: Optional[int] = None,
     user_agent: str = DEFAULT_USER_AGENT,
     semantic_scholar_api_key: Optional[str] = None,
     progress_callback: ProgressHook = None,
 ) -> Tuple[List[Dict[str, object]], FetchStats]:
     params = {
-        "filter": make_filter(ror_url, from_date, work_type),
-        "select": "id,display_name,title,publication_date,doi,abstract_inverted_index,abstract_inverted_index_v3,type,language,open_access,authorships",
+        "filter": make_filter(ror_url, from_date, work_type, to_date),
+        "select": "id,display_name,title,publication_date,doi,abstract_inverted_index,type,language,open_access,authorships",
         "per-page": PER_PAGE,
         "cursor": "*",
     }
@@ -345,9 +351,7 @@ def fetch_works_with_sdg(
             authorships = work.get("authorships") or []
             authors_str, insts_str = flatten_authors_and_institutions(authorships)
 
-            inv_v3 = work.get("abstract_inverted_index_v3")
-            inv = work.get("abstract_inverted_index")
-            abstract_text = reconstruct_abstract(inv_v3 if inv_v3 else inv)
+            abstract_text = reconstruct_abstract(work.get("abstract_inverted_index"))
 
             if not abstract_text:
                 stats.openalex_abstract_missing += 1
