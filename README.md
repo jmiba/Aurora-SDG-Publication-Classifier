@@ -42,6 +42,24 @@ A live demo is available at [Streamlit Cloud - Aurora SDG Publicaton Classifier]
 
 All data is downloaded to your machine. The cache file `cache.sqlite3` lives beside the scripts and is ignored by git. You can delete it at any time to force a fresh fetch.
 
+## Configuring secrets
+
+The app relies on Streamlit’s secrets mechanism. Create a `.streamlit/secrets.toml` file with entries like:
+
+```toml
+http_user_agent = "OpenAlex+Aurora SDG fetcher (mailto:you@example.com)"
+semantic_scholar_api_key = "YOUR-API-KEY"
+
+[advanced_options]
+default_from_date = "2020-01-01"
+```
+
+- `http_user_agent` is required and should include a contact email so OpenAlex can whitelist your requests.
+- `semantic_scholar_api_key` is optional but allows the app to pull missing abstracts directly from Semantic Scholar.
+- Under `[advanced_options]` you can set `default_from_date` to control the initial position of the publication date slider.
+
+A sample file is included in `.streamlit/secrets.toml`; update it with your real values. If a key is set to `"None"`, the app treats it as missing.
+
 ---
 
 Enjoy exploring how your institution’s publications map to the Sustainable Development Goals!
