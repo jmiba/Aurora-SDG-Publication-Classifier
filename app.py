@@ -177,9 +177,14 @@ def render_sdg_pie_chart(data: List[Tuple[str, float]], title: str):
     df = pd.DataFrame(data, columns=["SDG", "Value"])
     chart = (
         alt.Chart(df)
-        .mark_arc()
-        .encode(theta="Value", color="SDG", tooltip=["SDG", "Value"])
-        .properties(width=400, height=400, title=title)
+        .mark_arc(innerRadius=70)
+        .encode(
+            theta="Value",
+            color=alt.Color("SDG")
+            .legend(columns=1, labelLimit=300, titleLimit=300, title="Sustainable Development Goals"),
+            tooltip=["SDG", "Value"],
+        )
+        .properties(width=1650, height=450, title=title)
     )
     st.altair_chart(chart, use_container_width=True)
 
