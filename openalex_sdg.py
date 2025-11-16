@@ -114,6 +114,17 @@ def flatten_authors_and_institutions(authorships: Sequence[dict]) -> Tuple[str, 
     return "; ".join(author_names), "; ".join(inst_names)
 
 
+def abbreviate_authors(value: str) -> str:
+    if not value:
+        return ""
+    authors = [part.strip() for part in value.split(";") if part.strip()]
+    if not authors:
+        return ""
+    if len(authors) == 1:
+        return authors[0]
+    return f"{authors[0]} et al."
+
+
 def make_filter(
     ror_url: str, from_date: Optional[str], work_type: Optional[str], to_date: Optional[str] = None
 ) -> str:
@@ -445,7 +456,11 @@ def fetch_works_with_sdg(
             rows.append(row_data)
             stats.total_processed += 1
             upsert_work(row_data, raw_record=work)
-            label = f"Processed {title[:64] or openalex_id}"
+            authors_preview = abbreviate_authors(authors_str)
+            title_display = title if len(title) <= 120 else f"{title[:117]}..."
+            label = f"Processed {title_display or openalex_id}"
+            if authors_preview:
+                label += f" — {authors_preview}"
             if reused_sdg:
                 label += " (cached SDG)"
             emit_progress(label)

@@ -7,9 +7,12 @@ This Streamlit app helps you explore publications from the OpenAlex database for
 - **Search institutions**: Enter a name or paste a ROR URL (e.g. `https://ror.org/02msan859`). The built-in search talks to the ROR registry and keeps results handy so you do not have to re-run the query every time.
 - **Set filters**: Choose publication types, SDG classifier models, time windows (month-by-month slider), and optional record limits if you want a quick test run.
 - **Fetch SDG predictions**: The app call OpenAlex for metadata and Aurora for SDG scores. Missing abstracts are fetched from Semantic Scholar when possible, and everything is cached locally in `cache.sqlite3` to avoid redundant network calls.
-- **Inspect results instantly**: The “Preview” section shows the first 25 rows with friendly author/institution details. You can select one row to focus the SDG chart on that single publication.
+- **Inspect results instantly**: The “Preview” section shows 25 rows per page with friendly author/institution details. You can select a page and focus on a single row to drive the SDG chart.
 - **Visualize SDG coverage**: The pie ring chart aggregates SDG scores across all rows or the selected publication.
 - **Export data**: Download either a CSV or Excel file (with no external dependencies) for the entire result set.
+
+## Demo
+A live demo is available at [Streamlit Cloud - Aurora SDG Publicaton Classifier](https://aurora-sdg-publication-classifier.streamlit.app). Note that the demo instance may have usage limits and could be slower due to shared resources.
 
 ## How it works in the background
 
