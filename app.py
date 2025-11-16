@@ -203,7 +203,7 @@ def render_sdg_pie_chart(data: List[Tuple[str, float]], title: str):
             theta="Value",
             color=alt.Color("SDG")
             .legend(columns=1, labelLimit=300, titleLimit=300, title="Sustainable Development Goals"),
-            tooltip=["SDG", "Value"],
+        tooltip=[alt.Tooltip("SDG"), alt.Tooltip("Value", format=".1f", title="Value (%)")],
         )
         .properties(width=1650, height=450, title=title)
     )
