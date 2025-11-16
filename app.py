@@ -1,5 +1,6 @@
 import csv
 import io
+import math
 import re
 from datetime import date, datetime
 from pathlib import Path
@@ -36,6 +37,7 @@ PREVIEW_COLUMNS = [
     "doi",
     "institutions",
 ]
+PREVIEW_PAGE_SIZE = 25
 CSV_FIELDNAMES = [
     "openalex_id",
     "authors",
@@ -136,9 +138,15 @@ def resolve_semantic_scholar_key() -> Optional[str]:
     return get_secret_text(SECRET_SEMANTIC_SCHOLAR_KEY)
 
 
-def build_preview_rows(rows: List[Dict[str, Any]], columns: List[str], limit: int = 20) -> List[Dict[str, str]]:
+def build_preview_rows(
+    rows: List[Dict[str, Any]],
+    columns: List[str],
+    limit: int = 20,
+    offset: int = 0,
+) -> List[Dict[str, str]]:
     preview: List[Dict[str, str]] = []
-    for row in rows[:limit]:
+    subset = rows[offset : offset + max(limit, 0)]
+    for row in subset:
         preview.append({col: str(row.get(col, "") or "") for col in columns})
     return preview
 
@@ -587,7 +595,7 @@ def main():
         }
         st.session_state[RESULT_SESSION_KEY] = result_payload
         st.session_state.pop("preview_focus_index", None)
-        st.session_state.pop("preview_focus_mask", None)
+        st.session_state["preview_page"] = 1
     elif not result_payload:
         st.info("Click the button above to fetch publications.")
         return
@@ -610,18 +618,48 @@ def main():
         all_rows = list(csv.DictReader(io.StringIO(csv_text)))
     else:
         all_rows = rows
-    preview_rows = build_preview_rows(all_rows, PREVIEW_COLUMNS, limit=25)
+    total_rows = len(all_rows)
     selected_index = st.session_state.get("preview_focus_index")
-    focus_mask = st.session_state.get("preview_focus_mask")
-    if not isinstance(focus_mask, list) or len(focus_mask) != len(preview_rows):
-        focus_mask = [False] * len(preview_rows)
-    if isinstance(selected_index, int) and 0 <= selected_index < len(focus_mask):
-        focus_mask = [idx == selected_index for idx in range(len(focus_mask))]
     chart_rows: List[Dict[str, Any]] = all_rows
     selected_title: Optional[str] = None
-    if preview_rows:
+    if total_rows > 0:
         st.subheader("Preview", divider="orange")
         st.markdown(RADIO_CHECKBOX_CSS, unsafe_allow_html=True)
+        total_pages = max(1, math.ceil(total_rows / PREVIEW_PAGE_SIZE))
+        st.session_state.setdefault("preview_page", 1)
+        current_page = min(max(1, st.session_state["preview_page"]), total_pages)
+        if total_pages > 1:
+            first_col, prev_col, info_col, next_col, last_col = st.columns([1, 1, 2, 1, 1])
+
+            def set_page(target: int):
+                st.session_state["preview_page"] = max(1, min(total_pages, target))
+
+            first_col.button("⏮ First", disabled=current_page == 1, on_click=set_page, args=(1,))
+            prev_col.button(
+                "◀ Previous", disabled=current_page == 1, on_click=set_page, args=(current_page - 1,)
+            )
+            next_col.button(
+                "Next ▶",
+                disabled=current_page == total_pages,
+                on_click=set_page,
+                args=(current_page + 1,),
+            )
+            last_col.button(
+                "Last ⏭", disabled=current_page == total_pages, on_click=set_page, args=(total_pages,)
+            )
+            info_col.markdown(f"Page **{current_page} / {total_pages}**")
+        else:
+            current_page = 1
+        current_page = min(max(1, st.session_state.get("preview_page", 1)), total_pages)
+        start_index = (current_page - 1) * PREVIEW_PAGE_SIZE
+        preview_rows = build_preview_rows(
+            all_rows,
+            PREVIEW_COLUMNS,
+            limit=PREVIEW_PAGE_SIZE,
+            offset=start_index,
+        )
+        visible_indices = list(range(start_index, start_index + len(preview_rows)))
+        focus_mask = [idx == selected_index for idx in visible_indices]
         preview_df = pd.DataFrame(preview_rows)
         preview_df.insert(0, "Focus", focus_mask)
         edited_df = st.data_editor(
@@ -651,26 +689,26 @@ def main():
         changed = [idx for idx, (nval, oval) in enumerate(zip(new_mask, focus_mask)) if nval != oval]
         if changed:
             candidate = changed[-1]
-            selected_index = candidate if new_mask[candidate] else None
+            selected_index = visible_indices[candidate] if new_mask[candidate] else None
         elif any(new_mask):
-            selected_index = next((idx for idx, flag in enumerate(new_mask) if flag), None)
+            selected_index = next((visible_indices[idx] for idx, flag in enumerate(new_mask) if flag), None)
         else:
             selected_index = None
 
         if selected_index is not None and 0 <= selected_index < len(all_rows):
-            focus_mask = [idx == selected_index for idx in range(len(new_mask))]
             chart_rows = [all_rows[selected_index]]
             selected_title = all_rows[selected_index].get("title") or all_rows[selected_index].get("display_name")
         else:
-            focus_mask = [False] * len(new_mask)
             chart_rows = all_rows
             selected_index = None
             selected_title = None
 
         st.session_state["preview_focus_index"] = selected_index
-        st.session_state["preview_focus_mask"] = focus_mask
-        st.caption("Click the Focus column to inspect SDGs for a single publication (unselect for all).")
+        st.caption(
+            f"Showing page {current_page} of {total_pages}. Click Focus to inspect SDGs for a single publication."
+        )
     else:
+        st.session_state["preview_page"] = 1
         st.info("No preview rows available.")
 
     chart_data = aggregate_sdg_counts(chart_rows)
