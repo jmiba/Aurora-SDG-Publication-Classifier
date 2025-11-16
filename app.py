@@ -1,10 +1,6 @@
 import csv
 import io
-import json
 import re
-import time
-import unicodedata
-import calendar
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -15,40 +11,45 @@ import requests
 import streamlit as st
 import tomllib
 
-
-BASE_WORKS = "https://api.openalex.org/works"
-BASE_INSTITUTIONS = "https://api.openalex.org/institutions"
-AURORA_BASE = "https://aurora-sdg.labs.vu.nl/classifier/classify"
-SEMANTIC_SCHOLAR_API = (
-    "https://api.semanticscholar.org/graph/v1/paper/DOI:{doi}?fields=abstract"
+from openalex_sdg import (
+    AURORA_MODELS,
+    DEFAULT_USER_AGENT,
+    FetchStats,
+    fetch_works_with_sdg,
+    is_ror_url,
+    sanitize_filename,
+    search_institutions_by_name,
 )
 
-PER_PAGE = 200
-DEFAULT_USER_AGENT = (
-    "OpenAlex+Aurora SDG fetcher (mailto:you@example.com)"
-)
-
-AURORA_MODELS = [
-    ("aurora-sdg", "Aurora SDG mBERT (single-label, slower)"),
-    ("aurora-sdg-multi", "Aurora SDG multi-label mBERT (fast)"),
-    ("elsevier-sdg-multi", "Elsevier SDG multi-label mBERT (fast)"),
-    ("osdg", "OSDG model (multi-label, 15 languages)"),
-    ("skip", "Skip SDG classification (no Aurora API calls)"),
-]
-
-MIN_WORDS_BY_MODEL: Dict[str, int] = {"osdg": 50}
 SECRET_HTTP_USER_AGENT = "http_user_agent"
 SECRET_SEMANTIC_SCHOLAR_KEY = "semantic_scholar_api_key"
 SECRET_DEFAULT_START = "advanced_options.default_from_date"
 _SECRETS: Dict[str, Any] = {}
 PREVIEW_COLUMNS = [
     "openalex_id",
+    "authors",
     "title",
     "publication_date",
     "type",
     "doi",
-    "authors",
     "institutions",
+]
+CSV_FIELDNAMES = [
+    "openalex_id",
+    "authors",
+    "title",
+    "publication_date",
+    "doi",
+    "type",
+    "language",
+    "is_oa",
+    "oa_status",
+    "institutions",
+    "abstract",
+    "sdg_model",
+    "sdg_response",
+    "sdg_formatted",
+    "sdg_note",
 ]
 RESULT_SESSION_KEY = "fetch_result"
 SDG_THRESHOLD_PERCENT = 3.0
@@ -108,15 +109,6 @@ def _load_secrets() -> Dict[str, Any]:
     return _SECRETS
 
 
-def too_short_for_model(model: str, text: str) -> bool:
-    need = MIN_WORDS_BY_MODEL.get(model, 0)
-    return need > 0 and len((text or "").split()) < need
-
-
-def is_ror_url(value: str) -> bool:
-    return bool(re.match(r"^https?://ror\.org/[0-9a-z]{9}$", value.strip(), re.I))
-
-
 def get_secret_text(name: str) -> Optional[str]:
     if "." in name:
         section, key = name.split(".", 1)
@@ -142,241 +134,10 @@ def resolve_semantic_scholar_key() -> Optional[str]:
     return get_secret_text(SECRET_SEMANTIC_SCHOLAR_KEY)
 
 
-def subtract_months(base: date, months: int) -> date:
-    year = base.year
-    month = base.month - months
-    day = base.day
-    while month <= 0:
-        month += 12
-        year -= 1
-    last_day = calendar.monthrange(year, month)[1]
-    return date(year, month, min(day, last_day))
-
-
-def search_institutions_by_name(
-    name: str,
-    user_agent: str,
-    limit: int = 10,
-    timeout: int = 30,
-) -> List[dict]:
-    params = {"search": name, "per-page": limit}
-    headers = {"User-Agent": user_agent}
-    response = requests.get(
-        BASE_INSTITUTIONS, params=params, headers=headers, timeout=timeout
-    )
-    response.raise_for_status()
-    return response.json().get("results", [])
-
-
-def reconstruct_abstract(inv: Optional[Dict[str, List[int]]]) -> str:
-    if not inv:
-        return ""
-    max_pos = -1
-    for positions in inv.values():
-        if positions:
-            max_pos = max(max_pos, max(positions))
-    if max_pos < 0:
-        return ""
-    tokens_by_pos = [""] * (max_pos + 1)
-    for token, positions in inv.items():
-        for pos in positions:
-            if pos < 0:
-                continue
-            if pos >= len(tokens_by_pos):
-                tokens_by_pos.extend([""] * (pos - len(tokens_by_pos) + 1))
-            tokens_by_pos[pos] = (
-                f"{tokens_by_pos[pos]} {token}".strip() if tokens_by_pos[pos] else token
-            )
-    return " ".join(tokens_by_pos).strip()
-
-
-def flatten_authors_and_institutions(authorships: List[dict]) -> Tuple[str, str]:
-    if not authorships:
-        return "", ""
-    author_names: List[str] = []
-    institution_names: List[str] = []
-    for authorship in authorships:
-        author = (authorship.get("author") or {}).get("display_name")
-        if author:
-            author_names.append(author)
-        for inst in authorship.get("institutions") or []:
-            name = inst.get("display_name")
-            if name:
-                institution_names.append(name)
-    seen = set()
-    deduped_insts: List[str] = []
-    for name in institution_names:
-        if name not in seen:
-            seen.add(name)
-            deduped_insts.append(name)
-    return "; ".join(author_names), "; ".join(deduped_insts)
-
-
-def make_filter(
-    ror_url: str,
-    from_date: Optional[str],
-    to_date: Optional[str],
-    wtype: Optional[str],
-) -> str:
-    parts = [
-        f"institutions.ror:{ror_url}",
-        "is_paratext:false",
-    ]
-    if from_date:
-        parts.append(f"from_publication_date:{from_date}")
-    if to_date:
-        parts.append(f"to_publication_date:{to_date}")
-    if wtype:
-        parts.append(f"type:{wtype}")
-    return ",".join(parts)
-
-
-def classify_text_aurora(
-    model: str,
-    text: str,
-    session: requests.Session,
-    user_agent: str,
-    retries: int = 3,
-    pause: float = 0.4,
-) -> Tuple[Optional[dict], str]:
-    if not text:
-        return None, "no text"
-    url = f"{AURORA_BASE}/{model}"
-    headers = {
-        "User-Agent": user_agent,
-        "Content-Type": "application/json; charset=utf-8",
-    }
-    payload = {"text": text}
-    for attempt in range(1, retries + 1):
-        try:
-            resp = session.post(url, headers=headers, data=json.dumps(payload), timeout=60)
-            if resp.status_code == 429:
-                time.sleep(pause * attempt + 0.5)
-                continue
-            resp.raise_for_status()
-            data = resp.json()
-            return data or None, "" if data else "empty json"
-        except requests.RequestException as exc:
-            if attempt == retries:
-                code = getattr(getattr(exc, "response", None), "status_code", None)
-                return None, f"http_error:{code}"
-            time.sleep(pause * attempt)
-    return None, "unknown"
-
-
-def get_abstract_from_semantic_scholar(
-    doi: str,
-    api_key: Optional[str] = None,
-    retries: int = 3,
-    pause: float = 0.5,
-) -> Optional[str]:
-    if not doi:
-        return None
-    cleaned_doi = doi.replace("https://doi.org/", "")
-    url = SEMANTIC_SCHOLAR_API.format(doi=cleaned_doi)
-    headers = {"Accept": "application/json"}
-    if api_key:
-        headers["x-api-key"] = api_key
-    for attempt in range(1, retries + 1):
-        try:
-            resp = requests.get(url, headers=headers, timeout=20)
-            if resp.status_code == 429:
-                time.sleep(pause * attempt)
-                continue
-            resp.raise_for_status()
-            data = resp.json()
-            return data.get("abstract")
-        except requests.RequestException:
-            if attempt == retries:
-                return None
-            time.sleep(pause * attempt)
-    return None
-
-
-def format_sdg_predictions(sdg_json: Optional[dict]) -> str:
-    if not sdg_json:
-        return ""
-
-    def fmt_line(score: float, code: str, name: Optional[str]) -> str:
-        label = (name or f"SDG {code}".strip()).strip()
-        if label.lower().startswith("sdg "):
-            return f"{score * 100:.0f}% {label}"
-        return f"{score * 100:.0f}% SDG {code} ({label})"
-
-    items: List[Tuple[float, str, Optional[str]]] = []
-    preds = sdg_json.get("predictions") if isinstance(sdg_json, dict) else None
-    if isinstance(preds, list):
-        for prediction in preds:
-            sdg = prediction.get("sdg") or {}
-            code = sdg.get("code")
-            name = sdg.get("name")
-            score = prediction.get("prediction")
-            if code is None or score is None:
-                continue
-            try:
-                items.append((float(score), str(code), name))
-            except (TypeError, ValueError):
-                continue
-
-    if not items and isinstance(sdg_json, list):
-        for entry in sdg_json:
-            label = entry.get("label")
-            score = entry.get("score")
-            if label is None or score is None:
-                continue
-            match = re.search(r"\bSDG\s*(\d+)", str(label), re.I)
-            code = match.group(1) if match else ""
-            items.append((float(score), code, str(label)))
-
-    if (
-        not items
-        and isinstance(sdg_json, dict)
-        and "labels" in sdg_json
-        and "scores" in sdg_json
-    ):
-        for label, score in zip(sdg_json.get("labels", []), sdg_json.get("scores", [])):
-            match = re.search(r"\bSDG\s*(\d+)", str(label), re.I)
-            code = match.group(1) if match else ""
-            items.append((float(score), code, str(label)))
-
-    if not items and isinstance(sdg_json, dict):
-        numeric_keys = [key for key in sdg_json.keys() if str(key).isdigit()]
-        for key in numeric_keys:
-            try:
-                items.append((float(sdg_json[key]), str(key), None))
-            except (TypeError, ValueError):
-                continue
-
-    if (
-        not items
-        and isinstance(sdg_json, dict)
-        and isinstance(sdg_json.get("results"), list)
-    ):
-        for result in sdg_json["results"]:
-            code = result.get("sdg") or result.get("code")
-            score = result.get("score") or result.get("prediction")
-            name = result.get("name") or result.get("label")
-            if code is None or score is None:
-                continue
-            items.append((float(score), str(code), name))
-
-    if not items:
-        return ""
-
-    items.sort(key=lambda entry: entry[0], reverse=True)
-    return "\n".join(fmt_line(score, code, name) for score, code, name in items)
-
-
-def sanitize_filename(value: str) -> str:
-    normalized = unicodedata.normalize("NFKD", value)
-    cleaned = re.sub(r"[^\w.\-]+", "_", normalized)
-    return cleaned.strip("_")
-
-
-def build_preview_rows(rows: List[Dict[str, str]], columns: List[str], limit: int = 20) -> List[Dict[str, str]]:
+def build_preview_rows(rows: List[Dict[str, Any]], columns: List[str], limit: int = 20) -> List[Dict[str, str]]:
     preview: List[Dict[str, str]] = []
     for row in rows[:limit]:
-        preview.append({col: row.get(col, "") for col in columns})
+        preview.append({col: str(row.get(col, "") or "") for col in columns})
     return preview
 
 
@@ -395,7 +156,7 @@ def parse_sdg_formatted(value: str) -> List[Tuple[str, float, str]]:
     return entries
 
 
-def aggregate_sdg_counts(rows: List[Dict[str, str]]) -> List[Tuple[str, float]]:
+def aggregate_sdg_counts(rows: List[Dict[str, Any]]) -> List[Tuple[str, float]]:
     totals: Dict[str, float] = {}
     for row in rows:
         formatted = row.get("sdg_formatted") or ""
@@ -442,157 +203,14 @@ def build_output_filename(
     return sanitize_filename(f"{fname}.csv")
 
 
-def fetch_to_csv_with_sdg(
-    ror_url: str,
-    from_date_str: str,
-    to_date_str: Optional[str],
-    wtype: Optional[str],
-    model: str,
-    limit_rows: Optional[int],
-    user_agent: str,
-    semantic_scholar_key: Optional[str],
-    progress_callback,
-) -> Tuple[bytes, Dict[str, int]]:
-    headers = {"User-Agent": user_agent}
-    params = {
-        "filter": make_filter(ror_url, from_date_str, to_date_str, wtype),
-        "select": ",".join(
-            [
-                "id",
-                "display_name",
-                "title",
-                "publication_date",
-                "doi",
-                "abstract_inverted_index",
-                "type",
-                "language",
-                "open_access",
-                "authorships",
-            ]
-        ),
-        "per-page": PER_PAGE,
-        "cursor": "*",
-    }
-
-    fieldnames = [
-        "openalex_id",
-        "title",
-        "publication_date",
-        "doi",
-        "type",
-        "language",
-        "is_oa",
-        "oa_status",
-        "authors",
-        "institutions",
-        "abstract",
-        "sdg_model",
-        "sdg_response",
-        "sdg_formatted",
-        "sdg_note",
-    ]
-
+def rows_to_csv_bytes(rows: List[Dict[str, Any]]) -> bytes:
     buffer = io.StringIO()
-    writer = csv.DictWriter(buffer, fieldnames=fieldnames)
+    writer = csv.DictWriter(buffer, fieldnames=CSV_FIELDNAMES)
     writer.writeheader()
-
-    stats = {
-        "rows": 0,
-        "openalex_abstract_missing": 0,
-        "semantic_scholar_abstracts": 0,
-    }
-
-    with requests.Session() as session:
-        first_page = session.get(BASE_WORKS, params=params, headers=headers, timeout=60)
-        first_page.raise_for_status()
-        payload = first_page.json()
-        total_expected = (payload.get("meta") or {}).get("count")
-        results = payload.get("results", [])
-        next_cursor = (payload.get("meta") or {}).get("next_cursor")
-
-        def update_progress():
-            progress_callback(stats["rows"], total_expected, limit_rows)
-
-        def process_record(record: dict):
-            authorships = record.get("authorships") or []
-            authors, institutions = flatten_authors_and_institutions(authorships)
-            abstract = reconstruct_abstract(
-                record.get("abstract_inverted_index")
-            )
-            doi = record.get("doi") or ""
-            if not abstract:
-                stats["openalex_abstract_missing"] += 1
-                if doi:
-                    ss_abstract = get_abstract_from_semantic_scholar(doi, semantic_scholar_key)
-                    if ss_abstract:
-                        abstract = ss_abstract
-                        stats["semantic_scholar_abstracts"] += 1
-
-            text_for_sdg = abstract or record.get("display_name") or record.get("title") or ""
-            sdg_json = None
-            sdg_note = ""
-            sdg_formatted = ""
-            if model == "skip":
-                sdg_note = "skipped: user selected 'skip'"
-            elif model == "osdg" and too_short_for_model(model, text_for_sdg):
-                sdg_note = "skipped: osdg requires >=50 words"
-            else:
-                sdg_json, sdg_note = classify_text_aurora(
-                    model,
-                    text_for_sdg,
-                    session=session,
-                    user_agent=user_agent,
-                )
-                sdg_formatted = format_sdg_predictions(sdg_json) if sdg_json else ""
-                time.sleep(0.12)
-
-            writer.writerow(
-                {
-                    "openalex_id": record.get("id", ""),
-                    "title": record.get("display_name") or record.get("title") or "",
-                    "publication_date": record.get("publication_date") or "",
-                    "doi": doi,
-                    "type": record.get("type") or "",
-                    "language": record.get("language") or "",
-                    "is_oa": (record.get("open_access") or {}).get("is_oa"),
-                    "oa_status": (record.get("open_access") or {}).get("oa_status") or "",
-                    "authors": authors,
-                    "institutions": institutions,
-                    "abstract": abstract,
-                    "sdg_model": model,
-                    "sdg_response": json.dumps(sdg_json, ensure_ascii=False) if sdg_json else "",
-                    "sdg_formatted": sdg_formatted,
-                    "sdg_note": sdg_note,
-                }
-            )
-            stats["rows"] += 1
-            update_progress()
-
-        for record in results:
-            if limit_rows is not None and stats["rows"] >= limit_rows:
-                next_cursor = None
-                break
-            process_record(record)
-
-        while next_cursor:
-            if limit_rows is not None and stats["rows"] >= limit_rows:
-                break
-            params["cursor"] = next_cursor
-            response = session.get(BASE_WORKS, params=params, headers=headers, timeout=60)
-            response.raise_for_status()
-            payload = response.json()
-            results = payload.get("results", [])
-            next_cursor = (payload.get("meta") or {}).get("next_cursor")
-            for record in results:
-                if limit_rows is not None and stats["rows"] >= limit_rows:
-                    next_cursor = None
-                    break
-                process_record(record)
-            time.sleep(0.2)
-
-    update_progress()
+    for row in rows:
+        writer.writerow({field: row.get(field, "") for field in CSV_FIELDNAMES})
     buffer.seek(0)
-    return buffer.getvalue().encode("utf-8"), stats
+    return buffer.getvalue().encode("utf-8")
 
 
 def render_institution_selector(user_agent: str) -> Optional[str]:
@@ -784,18 +402,19 @@ def main():
         progress_bar = st.progress(0)
         progress_text = st.empty()
 
-        def progress_callback(done: int, expected: Optional[int], limit: Optional[int]):
-            target = limit or expected
-            fraction = 0.0
-            if target:
-                fraction = min(done / target, 1.0)
+        def progress_callback(done: int, expected: Optional[int], message: str):
+            target = limit_rows or expected
+            fraction = min(done / target, 1.0) if target else 0.0
             progress_bar.progress(fraction)
             if expected:
-                progress_text.text(f"Processed {done:,} of {expected:,} works")
-            elif limit:
-                progress_text.text(f"Processed {done:,} of {limit:,} requested works")
+                status = f"Processed {done:,} of {expected:,} works"
+            elif limit_rows:
+                status = f"Processed {done:,} of {limit_rows:,} requested works"
             else:
-                progress_text.text(f"Processed {done:,} works")
+                status = f"Processed {done:,} works"
+            if message:
+                status = f"{status} – {message}"
+            progress_text.text(status)
 
         filename = build_output_filename(
             ror_url,
@@ -808,15 +427,15 @@ def main():
 
         with st.spinner("Contacting OpenAlex and Aurora APIs…"):
             try:
-                csv_bytes, stats = fetch_to_csv_with_sdg(
+                rows, stats = fetch_works_with_sdg(
                     ror_url=ror_url,
-                    from_date_str=from_date_str,
-                    to_date_str=to_date_str,
-                    wtype=publication_type,
+                    from_date=from_date_str,
+                    work_type=publication_type,
                     model=model,
+                    to_date=to_date_str,
                     limit_rows=limit_rows,
                     user_agent=user_agent.strip() or DEFAULT_USER_AGENT,
-                    semantic_scholar_key=semantic_scholar_key,
+                    semantic_scholar_api_key=semantic_scholar_key,
                     progress_callback=progress_callback,
                 )
             except requests.HTTPError as exc:
@@ -832,8 +451,10 @@ def main():
 
         progress_bar.empty()
         progress_text.empty()
+        csv_bytes = rows_to_csv_bytes(rows)
         result_payload = {
             "csv_bytes": csv_bytes,
+            "rows": rows,
             "stats": stats,
             "filename": filename,
             "params": current_params,
@@ -845,20 +466,24 @@ def main():
         st.info("Click the button above to fetch publications.")
         return
 
-    csv_bytes = result_payload["csv_bytes"]
-    stats = result_payload["stats"]
-    filename = result_payload["filename"]
+    csv_bytes: bytes = result_payload["csv_bytes"]
+    stats: FetchStats = result_payload["stats"]
+    filename: str = result_payload["filename"]
+    rows: Optional[List[Dict[str, Any]]] = result_payload.get("rows")
 
     st.success(
-        f"Wrote {stats['rows']:,} rows. "
-        f"OpenAlex missing abstracts: {stats['openalex_abstract_missing']:,}; "
-        f"retrieved from Semantic Scholar: {stats['semantic_scholar_abstracts']:,}."
+        f"Wrote {stats.total_processed:,} rows. "
+        f"OpenAlex missing abstracts: {stats.openalex_abstract_missing:,}; "
+        f"retrieved from Semantic Scholar: {stats.ss_abstract_retrieved:,}."
     )
-    try:
-        csv_text = csv_bytes.decode("utf-8")
-    except UnicodeDecodeError:
-        csv_text = csv_bytes.decode("utf-8", errors="ignore")
-    all_rows = list(csv.DictReader(io.StringIO(csv_text)))
+    if rows is None:
+        try:
+            csv_text = csv_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            csv_text = csv_bytes.decode("utf-8", errors="ignore")
+        all_rows = list(csv.DictReader(io.StringIO(csv_text)))
+    else:
+        all_rows = rows
     preview_rows = build_preview_rows(all_rows, PREVIEW_COLUMNS, limit=25)
     selected_index = st.session_state.get("preview_focus_index")
     focus_mask = st.session_state.get("preview_focus_mask")
@@ -866,7 +491,7 @@ def main():
         focus_mask = [False] * len(preview_rows)
     if isinstance(selected_index, int) and 0 <= selected_index < len(focus_mask):
         focus_mask = [idx == selected_index for idx in range(len(focus_mask))]
-    chart_rows: List[Dict[str, str]] = all_rows
+    chart_rows: List[Dict[str, Any]] = all_rows
     selected_title: Optional[str] = None
     if preview_rows:
         st.subheader("Preview")
