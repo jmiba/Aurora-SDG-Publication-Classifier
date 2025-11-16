@@ -151,6 +151,17 @@ def build_preview_rows(
     return preview
 
 
+def abbreviate_authors(value: str) -> str:
+    if not value:
+        return ""
+    authors = [part.strip() for part in value.split(";") if part.strip()]
+    if not authors:
+        return ""
+    if len(authors) == 1:
+        return authors[0]
+    return f"{authors[0]} et al."
+
+
 def parse_sdg_formatted(value: str) -> List[Tuple[str, float, str]]:
     entries: List[Tuple[str, float, str]] = []
     if not value:
@@ -654,21 +665,20 @@ def main():
             offset=start_index,
         )
         visible_indices = list(range(start_index, start_index + len(preview_rows)))
-        focus_mask = [idx == selected_index for idx in visible_indices]
         preview_df = pd.DataFrame(preview_rows)
-        preview_df.insert(0, "Focus", focus_mask)
-        edited_df = st.data_editor(
+        if "authors" in preview_df.columns:
+            preview_df["authors"] = preview_df["authors"].apply(abbreviate_authors)
+        preview_df.insert(0, "#", range(start_index + 1, start_index + 1 + len(preview_df)))
+        rows_in_page = len(preview_df)
+        table_height = 980 if rows_in_page >= PREVIEW_PAGE_SIZE else max(200, rows_in_page * 35 + 120)
+        st.data_editor(
             preview_df,
-            hide_index=False,
-            #start_index= 1,
-            height=1000,
+            hide_index=True,
+            disabled=True,
+            height=table_height,
             width="stretch",
             column_config={
-                "Focus": st.column_config.CheckboxColumn(
-                    "Focus",
-                    help="Behaves like a radio button: only one selection is used.",
-                    default=False,
-                ),
+                "#": st.column_config.NumberColumn("#", help="Row number in this page"),
                 "openalex_id": st.column_config.LinkColumn(
                     "OpenAlex ID",
                     help="Open the work in OpenAlex",
@@ -681,16 +691,26 @@ def main():
                 ),
             },
         )
-        edited_df = pd.DataFrame(edited_df)
-        new_mask = [bool(flag) for flag in edited_df["Focus"]]
-        changed = [idx for idx, (nval, oval) in enumerate(zip(new_mask, focus_mask)) if nval != oval]
-        if changed:
-            candidate = changed[-1]
-            selected_index = visible_indices[candidate] if new_mask[candidate] else None
-        elif any(new_mask):
-            selected_index = next((visible_indices[idx] for idx, flag in enumerate(new_mask) if flag), None)
-        else:
-            selected_index = None
+        st.caption("Select a publication below (0 = All).")
+        dropdown_options = ["0 — All publications"]
+        for idx, row in enumerate(all_rows):
+            title_preview = (row.get("title") or row.get("display_name") or "(no title)")[:80]
+            authors_preview = abbreviate_authors(row.get("authors") or "")
+            if authors_preview:
+                dropdown_options.append(f"{idx + 1} — {authors_preview}, {title_preview}")
+            else:
+                dropdown_options.append(f"{idx + 1} — {title_preview}")
+        dropdown_default = (
+            0 if selected_index is None else min(max(0, selected_index + 1), total_rows)
+        )
+        selected_option = st.selectbox(
+            "Focus publication",
+            options=list(range(len(dropdown_options))),
+            format_func=lambda idx: dropdown_options[idx],
+            index=dropdown_default,
+        )
+        selected_index = selected_option - 1 if selected_option > 0 else None
+        st.session_state["preview_focus_index"] = selected_index
 
         if selected_index is not None and 0 <= selected_index < len(all_rows):
             chart_rows = [all_rows[selected_index]]
@@ -700,10 +720,7 @@ def main():
             selected_index = None
             selected_title = None
 
-        st.session_state["preview_focus_index"] = selected_index
-        st.caption(
-            f"Showing page {current_page} of {total_pages}. Click Focus to inspect SDGs for a single publication."
-        )
+        st.caption(f"Showing page {current_page} of {total_pages}. Use the slider to inspect SDGs per publication.")
     else:
         st.session_state["preview_page"] = 1
         st.info("No preview rows available.")
