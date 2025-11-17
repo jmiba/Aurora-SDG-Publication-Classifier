@@ -319,7 +319,7 @@ def render_oa_status_chart(rows: List[Dict[str, Any]], start_date: str, end_date
 
 
 def render_author_oa_chart(rows: List[Dict[str, Any]], start_date: str, end_date: str, max_authors: int = 20):
-    st.subheader("OA distribution by author", divider="green")
+    st.subheader("OA distribution by author", divider="violet")
     if not rows:
         st.info("No publications available to display per-author OA status.")
         return
