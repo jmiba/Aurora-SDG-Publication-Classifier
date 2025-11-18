@@ -19,23 +19,25 @@ A live demo is available at [Streamlit Cloud - Aurora SDG Publicaton Classifier]
 ```mermaid
 flowchart TB
     A[User picks ROR + options] --> B[Fetch OpenAlex works]
-    B --> C{Abstract available}
+    B --> C{Abstract available?}
     C -->|Yes| D[Use OpenAlex abstract]
-    C -->|No| E{Cached abstract}
+    C -->|No| E{Cached abstract?}
     E -->|Yes| D
     E -->|No| F{Semantic Scholar via DOI}
     F -->|Found| D
-    F -->|Missing| G{Google Scholar fallback}?
-    G -->|Found| D
-    G -->|Still missing| H[Use title for SDG]
-    D --> I{SDG cached}
-    H --> I
-    I -->|Cache valid| J[Reuse SDG results]
-    I -->|Needs run| K[Call Aurora classifier]
-    K --> L[Store SDG + abstract in cache]
-    J --> L
-    L --> M[Streamlit preview + charts]
-    M --> N[Download CSV/XLSX]
+    F -->|Missing| G{Google Scholar enabled?}
+    G -->|No| H[Use title for SDG]
+    G -->|Yes| I{Google Scholar abstract}
+    I -->|Found| D
+    I -->|Missing| H
+    D --> J{SDG cached?}
+    H --> J
+    J -->|Cache valid| K[Reuse SDG results]
+    J -->|Needs run| L[Call Aurora classifier]
+    L --> M[Store SDG + abstract in cache]
+    K --> M
+    M --> N[Streamlit preview + charts]
+    N --> O[Download CSV/XLSX]
 ```
 
 ## How it works in the background
