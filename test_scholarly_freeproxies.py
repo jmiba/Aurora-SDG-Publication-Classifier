@@ -9,6 +9,7 @@ from typing import Any, Dict
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse CLI flags for the manual scholarly tester."""
     parser = argparse.ArgumentParser(
         description="Run a simple Google Scholar query via scholarly using FreeProxies.",
     )
@@ -31,11 +32,13 @@ def parse_args() -> argparse.Namespace:
 
 
 def configure_logging(verbose: bool) -> None:
+    """Configure root logging for the script."""
     level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(level=level, format="%(levelname)s | %(message)s")
 
 
 def main() -> int:
+    """Entry point for exercising scholarly proxy behavior."""
     args = parse_args()
     configure_logging(args.verbose)
 

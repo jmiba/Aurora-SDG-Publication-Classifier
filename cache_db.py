@@ -1,3 +1,5 @@
+"""Simple SQLite-backed cache for OpenAlex works and SDG classifications."""
+
 import json
 import sqlite3
 import threading
@@ -11,6 +13,7 @@ _CONN: Optional[sqlite3.Connection] = None
 
 
 def _get_conn() -> sqlite3.Connection:
+    """Return a global SQLite connection, initializing schema if needed."""
     global _CONN
     if _CONN is None:
         DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -23,6 +26,7 @@ def _get_conn() -> sqlite3.Connection:
 
 
 def _init_schema(conn: sqlite3.Connection) -> None:
+    """Create tables/indexes the first time the cache database is opened."""
     with conn:
         conn.execute(
             """
@@ -65,6 +69,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
 
 
 def get_cached_work(openalex_id: str) -> Optional[Dict[str, Any]]:
+    """Return cached work metadata for the given OpenAlex ID, if present."""
     conn = _get_conn()
     cur = conn.execute(
         "SELECT * FROM works WHERE openalex_id = ?", (openalex_id.strip(),)
@@ -74,6 +79,7 @@ def get_cached_work(openalex_id: str) -> Optional[Dict[str, Any]]:
 
 
 def upsert_work(row: Dict[str, Any], raw_record: Optional[Dict[str, Any]] = None) -> None:
+    """Create/update a work row with minimal locking to avoid duplicate fetches."""
     conn = _get_conn()
     payload = {
         "openalex_id": row.get("openalex_id"),
@@ -108,6 +114,7 @@ def upsert_work(row: Dict[str, Any], raw_record: Optional[Dict[str, Any]] = None
 
 
 def get_cached_sdg_result(openalex_id: str, model: str) -> Optional[Dict[str, Any]]:
+    """Return cached SDG classification data for a work/model pair."""
     conn = _get_conn()
     cur = conn.execute(
         """
@@ -128,6 +135,7 @@ def upsert_sdg_result(
     sdg_formatted: str,
     sdg_note: str,
 ) -> None:
+    """Persist the SDG API payload so later runs can reuse it."""
     conn = _get_conn()
     payload = {
         "openalex_id": openalex_id.strip(),
