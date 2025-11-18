@@ -20,13 +20,13 @@ A live demo is available at [Streamlit Cloud - Aurora SDG Publicaton Classifier]
 flowchart TB
     A[User picks ROR + options] --> B[Fetch OpenAlex works]
     B --> C{Abstract available?}
-    C -->|Yes| D[Use OpenAlex abstract]
+    C -->|Yes| D[Use abstract for SDG classification]
     C -->|No| E{Cached abstract?}
     E -->|Yes| D
     E -->|No| F{Semantic Scholar via DOI}
     F -->|Found| D
     F -->|Missing| G{Google Scholar enabled?}
-    I -.->|Missing| H[Use title for SDG]
+    I -.->|Missing| H[Use title for SDG classification]
     G -->|No| H
     G -.->|Yes| I{Google Scholar abstract}
     I -.->|Found| D
