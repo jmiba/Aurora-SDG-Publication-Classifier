@@ -26,10 +26,10 @@ flowchart TB
     E -->|No| F{Semantic Scholar via DOI}
     F -->|Found| D
     F -->|Missing| G{Google Scholar enabled?}
-    G -->|No| H[Use title for SDG]
+    I -->|Missing| H[Use title for SDG]
+    G -->|No| H
     G -->|Yes| I{Google Scholar abstract}
     I -->|Found| D
-    I -->|Missing| H
     D --> J{SDG cached?}
     H --> J
     J -->|Cache valid| K[Reuse SDG results]
