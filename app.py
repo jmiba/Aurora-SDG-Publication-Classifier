@@ -851,8 +851,8 @@ def main():
     model = render_model_selector()
     semantic_scholar_key = resolve_semantic_scholar_key()
     google_scholar_enabled = resolve_google_scholar_enabled()
-    if not google_scholar_enabled:
-        st.info("Google Scholar lookups disabled via secrets.", icon="🚫")
+    if google_scholar_enabled:
+        st.info("Google Scholar lookups disabled via secrets.", icon=":material/check_circle:")
     default_from_date = get_secret_text(SECRET_DEFAULT_START)
     from_date_str, to_date_str, limit_rows = render_advanced_options(
         semantic_scholar_key,
