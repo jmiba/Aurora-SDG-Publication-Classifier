@@ -14,7 +14,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 import requests
 
 try:  # pragma: no cover - optional dependency
-    from scholarly import scholarly  # type: ignore
+    from scholarly import scholarly, ProxyGenerator  # type: ignore
 except Exception:  # pragma: no cover - no scholarly installed / available
     scholarly = None
 
@@ -179,6 +179,22 @@ def get_abstract_from_google_scholar(title: str, authors: str) -> Optional[str]:
     if not normalized_target:
         return None
     target_authors = _author_tokens_from_string(authors)
+    pg = ProxyGenerator()
+    try:
+        success = pg.FreeProxies()
+    except TypeError as exc:
+        logging.warning(
+            "scholarly proxy setup failed due to incompatible httpx (%s); not querying Google Scholar",
+            exc,
+        )
+        return None
+    except Exception as exc:
+        logging.debug("scholarly proxy setup failed: %s", exc)
+        return None
+    if not success:
+        logging.info("No free proxy available; skipping Google Scholar fetch for '%s'", title)
+        return None
+    scholarly.use_proxy(pg)
     try:
         search_iter = scholarly.search_pubs(title)
     except Exception as exc:  # pragma: no cover - network / import dependent
@@ -215,7 +231,13 @@ def get_abstract_from_google_scholar(title: str, authors: str) -> Optional[str]:
         bib_data = filled.get("bib") if isinstance(filled, dict) else bib
         abstract = (bib_data or {}).get("abstract") or (bib or {}).get("abstract")
         if abstract:
-            return abstract.strip()
+            logging.info(
+                "Google Scholar abstract retrieved for '%s' (result #%d)",
+                candidate_title,
+                checked,
+            )
+            return clean_html_fragment(abstract)
+    logging.info("Google Scholar abstract not found for '%s'", title)
     return None
 
 
@@ -423,6 +445,7 @@ def fetch_works_with_sdg(
     limit_rows: Optional[int] = None,
     user_agent: str = DEFAULT_USER_AGENT,
     semantic_scholar_api_key: Optional[str] = None,
+    enable_google_scholar: bool = True,
     progress_callback: ProgressHook = None,
     cancel_check: Optional[Callable[[], bool]] = None,
 ) -> Tuple[List[Dict[str, object]], FetchStats]:
@@ -487,6 +510,12 @@ def fetch_works_with_sdg(
 
             abstract_text = reconstruct_abstract(work.get("abstract_inverted_index"))
             abstract_updated = False
+            authors_preview = abbreviate_authors(authors_str)
+            title_display = title if len(title) <= 120 else f"{title[:117]}..."
+            detail_label = title_display or openalex_id or "Untitled work"
+            if authors_preview:
+                detail_label = f"{authors_preview}, {detail_label}"
+            emit_progress(detail_label)
 
             if not abstract_text:
                 stats.openalex_abstract_missing += 1
@@ -499,7 +528,7 @@ def fetch_works_with_sdg(
                     if ss_abstract:
                         abstract_text = ss_abstract
                         stats.ss_abstract_retrieved += 1
-            if not abstract_text:
+            if enable_google_scholar and not abstract_text:
                 scholar_abstract = get_abstract_from_google_scholar(title, authors_str)
                 if scholar_abstract:
                     abstract_text = scholar_abstract
@@ -579,15 +608,7 @@ def fetch_works_with_sdg(
             rows.append(row_data)
             stats.total_processed += 1
             upsert_work(row_data, raw_record=work)
-            authors_preview = abbreviate_authors(authors_str)
-            title_display = title if len(title) <= 120 else f"{title[:117]}..."
-            label = f"Processed: "
-            if authors_preview:
-                label += f"{authors_preview}, "
-            label += f"{title_display or openalex_id}"
-            if reused_sdg:
-                label += " (cached SDG)"
-            emit_progress(label)
+            emit_progress("")
 
         for work in results:
             _ensure_not_cancelled()

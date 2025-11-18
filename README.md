@@ -43,14 +43,14 @@ flowchart TB
 1. **OpenAlex fetch**: We request the Works API using your selected ROR, date range, and publication type. The request uses a friendly User-Agent (set via `.streamlit/secrets.toml`) to comply with API guidelines.
 2. **Caching**: Each returned record and SDG classification is stored in a local SQLite database (`cache.sqlite3`). When you rerun the query, previously fetched publications are loaded from the cache, so the Aurora SDG API is only contacted for new or uncached works. The cache runs in WAL mode for safe concurrent access.
 3. **SDG classification**: Depending on the model you pick (“aurora-sdg”, “aurora-sdg-multi”, “elsevier-sdg-multi”, “osdg”, or “skip”), abstracts or titles are sent to the relevant Aurora endpoint. Short abstracts are skipped when the model requires a minimum length (e.g., the OSDG model).
-4. **Abstract enrichment**: If OpenAlex provides no abstract we reuse any cached text, otherwise call the Semantic Scholar API (optional key via secrets). As a final fallback we search Google Scholar via `scholarly`. All retrieved abstracts are cleaned (HTML stripped) and cached.
+4. **Abstract enrichment**: If OpenAlex provides no abstract we reuse any cached text, otherwise call the Semantic Scholar API (optional key via secrets). As a final fallback we search Google Scholar via `scholarly` (you can toggle this in `secrets.toml`). All retrieved abstracts are cleaned (HTML stripped) and cached.
 5. **Preview**: The Streamlit UI converts the cached data into a small DataFrame. OpenAlex IDs and DOIs are shown as clickable links; the selection checkbox behaves like a radio button so only one item is highlighted at a time.
 6. **Exports**: A custom lightweight Excel writer assembles `.xlsx` files without additional libraries, ensuring easy downloads even in bare environments.
 
 ## Getting started
 
 1. **Install dependencies**: `pip install -r requirements.txt` (Streamlit, pandas, requests, Altair, scholarly).
-2. **Configure secrets**: Create `.streamlit/secrets.toml` with at least an `http_user_agent`. Optional keys let you set a default start date and a Semantic Scholar API key.
+2. **Configure secrets**: Create `.streamlit/secrets.toml` with at least an `http_user_agent`. Optional keys let you set a default start date, a Semantic Scholar API key, and whether Google Scholar lookups should run.
 3. **Run the app**: `streamlit run app.py` from the project directory.
 4. **Use the interface**: Search or paste a ROR, choose options, and press “Fetch works and build CSV.” Progress bars show how many works have been processed.
 5. **Download your data**: After the fetch completes you’ll see the chart, preview, and buttons for Excel/CSV downloads.
@@ -73,6 +73,7 @@ The app relies on Streamlit’s secrets mechanism. Create a `.streamlit/secrets.
 ```toml
 http_user_agent = "OpenAlex+Aurora SDG fetcher (mailto:you@example.com)"
 semantic_scholar_api_key = "YOUR-API-KEY"
+google_scholar_enabled = true
 
 [advanced_options]
 default_from_date = "2020-01-01"
@@ -80,6 +81,7 @@ default_from_date = "2020-01-01"
 
 - `http_user_agent` is required and should include a contact email so OpenAlex can whitelist your requests.
 - `semantic_scholar_api_key` is optional but allows the app to pull missing abstracts directly from Semantic Scholar.
+- `google_scholar_enabled` controls whether the fallback scraper runs (`true` by default). Set it to `false` if you need to avoid Google Scholar requests (e.g., for compliance or when proxies misbehave).
 - Under `[advanced_options]` you can set `default_from_date` to control the initial position of the publication date slider.
 
 A sample file is included in `.streamlit/secrets.toml`; update it with your real values. If a key is set to `"None"`, the app treats it as missing.

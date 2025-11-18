@@ -27,6 +27,7 @@ from openalex_sdg import (
 
 SECRET_HTTP_USER_AGENT = "http_user_agent"
 SECRET_SEMANTIC_SCHOLAR_KEY = "semantic_scholar_api_key"
+SECRET_GOOGLE_SCHOLAR_ENABLED = "google_scholar_enabled"
 SECRET_DEFAULT_START = "advanced_options.default_from_date"
 _SECRETS: Dict[str, Any] = {}
 PREVIEW_COLUMNS = [
@@ -137,6 +138,18 @@ def get_secret_text(name: str) -> Optional[str]:
     return text
 
 
+def get_secret_bool(name: str) -> Optional[bool]:
+    text = get_secret_text(name)
+    if text is None:
+        return None
+    value = text.strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    return None
+
+
 def resolve_user_agent() -> Tuple[str, bool]:
     secret_value = get_secret_text(SECRET_HTTP_USER_AGENT)
     if secret_value:
@@ -146,6 +159,13 @@ def resolve_user_agent() -> Tuple[str, bool]:
 
 def resolve_semantic_scholar_key() -> Optional[str]:
     return get_secret_text(SECRET_SEMANTIC_SCHOLAR_KEY)
+
+
+def resolve_google_scholar_enabled() -> bool:
+    value = get_secret_bool(SECRET_GOOGLE_SCHOLAR_ENABLED)
+    if value is None:
+        return True
+    return value
 
 
 def build_preview_rows(
@@ -220,7 +240,7 @@ def render_sdg_pie_chart(data: List[Tuple[str, float]], title: str):
         )
         .properties(width=1650, height=450, title=title)
     )
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(chart, width="stretch")
 
 
 def render_oa_status_chart(rows: List[Dict[str, Any]], start_date: str, end_date: str):
@@ -316,7 +336,7 @@ def render_oa_status_chart(rows: List[Dict[str, Any]], start_date: str, end_date
             title=f"Publications from {start_month:%b %Y} to {end_month:%b %Y}",
         )
     )
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(chart, width="stretch")
 
 
 def render_publication_type_chart(rows: List[Dict[str, Any]], start_date: str, end_date: str):
@@ -395,7 +415,7 @@ def render_publication_type_chart(rows: List[Dict[str, Any]], start_date: str, e
             title="Publication type distribution in the selected time frame",
         )
     )
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(chart, width="stretch")
 
 
 def render_author_oa_chart(rows: List[Dict[str, Any]], start_date: str, end_date: str, max_authors: int = 20):
@@ -514,7 +534,7 @@ def render_author_oa_chart(rows: List[Dict[str, Any]], start_date: str, end_date
             title=f"OA status distribution for top {len(author_order)} authors",
         )
     )
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(chart, width="stretch")
     st.caption("Authors ranked by number of publications in the selected period.")
 
 
@@ -770,10 +790,18 @@ def render_advanced_options(
         months = [today]
     labels = [dt.strftime("%B %Y") for dt in months]
     label_to_date = dict(zip(labels, months))
+    desired_start = date(today.year - 2, 1, 1)
+    start_default_date = next((m for m in months if m >= desired_start), months[-1])
+    start_default_label = labels[months.index(start_default_date)]
+    end_default_label = labels[-1]
     range_selection = st.select_slider(
         "Select publication period",
         options=labels,
-        value=(labels[0], labels[-1]) if len(labels) > 1 else (labels[0], labels[0]),
+        value=(
+            (start_default_label, end_default_label)
+            if len(labels) > 1
+            else (labels[0], labels[0])
+        ),
         format_func=lambda label: label,
     )
     start_label, end_label = range_selection
@@ -822,6 +850,9 @@ def main():
     publication_type = render_publication_type_selector()
     model = render_model_selector()
     semantic_scholar_key = resolve_semantic_scholar_key()
+    google_scholar_enabled = resolve_google_scholar_enabled()
+    if not google_scholar_enabled:
+        st.info("Google Scholar lookups disabled via secrets.", icon="🚫")
     default_from_date = get_secret_text(SECRET_DEFAULT_START)
     from_date_str, to_date_str, limit_rows = render_advanced_options(
         semantic_scholar_key,
@@ -867,8 +898,11 @@ def main():
             st.session_state["fetch_cancel_requested"] = True
         progress_bar = st.progress(0)
         progress_text = st.empty()
+        progress_detail = st.empty()
+        current_detail: str = ""
 
         def progress_callback(done: int, expected: Optional[int], message: str):
+            nonlocal current_detail
             target = limit_rows or expected
             fraction = min(done / target, 1.0) if target else 0.0
             progress_bar.progress(fraction)
@@ -879,7 +913,11 @@ def main():
             else:
                 status = f"Processed {done:,} works"
             if message:
-                status = f"{status} – {message}"
+                current_detail = message
+            if current_detail:
+                progress_detail.text(f"Currently processing: {current_detail}")
+            else:
+                progress_detail.empty()
             progress_text.text(status)
 
         filename = build_output_filename(
@@ -905,12 +943,14 @@ def main():
                     limit_rows=limit_rows,
                     user_agent=user_agent.strip() or DEFAULT_USER_AGENT,
                     semantic_scholar_api_key=semantic_scholar_key,
+                    enable_google_scholar=google_scholar_enabled,
                     progress_callback=progress_callback,
                     cancel_check=cancel_check,
                 )
             except FetchCancelled:
                 progress_bar.empty()
                 progress_text.empty()
+                progress_detail.empty()
                 st.session_state["fetch_in_progress"] = False
                 st.session_state["fetch_cancel_requested"] = False
                 cancel_container.empty()
@@ -919,6 +959,7 @@ def main():
             except requests.HTTPError as exc:
                 progress_bar.empty()
                 progress_text.empty()
+                progress_detail.empty()
                 st.session_state["fetch_in_progress"] = False
                 st.session_state["fetch_cancel_requested"] = False
                 cancel_container.empty()
@@ -927,6 +968,7 @@ def main():
             except requests.RequestException as exc:
                 progress_bar.empty()
                 progress_text.empty()
+                progress_detail.empty()
                 st.session_state["fetch_in_progress"] = False
                 st.session_state["fetch_cancel_requested"] = False
                 cancel_container.empty()
@@ -935,6 +977,7 @@ def main():
 
         progress_bar.empty()
         progress_text.empty()
+        progress_detail.empty()
         st.session_state["fetch_in_progress"] = False
         st.session_state["fetch_cancel_requested"] = False
         cancel_container.empty()
