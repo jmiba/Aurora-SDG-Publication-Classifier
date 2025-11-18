@@ -67,17 +67,20 @@ class FetchStats:
 
 
 def too_short_for_model(model: str, text: str) -> bool:
+    """Return True if the supplied text lacks the minimum word count for a model."""
     need = MIN_WORDS_BY_MODEL.get(model, 0)
     return need > 0 and len((text or "").split()) < need
 
 
 def is_ror_url(value: str) -> bool:
+    """Lightweight validation for ROR URLs (https://ror.org/XXXXXXXXX)."""
     return bool(re.match(r"^https?://ror\.org/[0-9a-z]{9}$", value.strip(), flags=re.I))
 
 
 def search_institutions_by_name(
     name: str, user_agent: str = DEFAULT_USER_AGENT, limit: int = 10
 ) -> List[dict]:
+    """Query the OpenAlex institutions endpoint using the user's keyword."""
     params = {"search": name, "per-page": limit}
     headers = {"User-Agent": user_agent}
     response = requests.get(BASE_INSTITUTIONS, params=params, headers=headers, timeout=30)
@@ -109,6 +112,7 @@ def reconstruct_abstract(inv: Optional[dict]) -> str:
 
 
 def flatten_authors_and_institutions(authorships: Sequence[dict]) -> Tuple[str, str]:
+    """Convert OpenAlex authorship structures into 'A; B' strings."""
     if not authorships:
         return "", ""
     author_names: List[str] = []
@@ -131,6 +135,7 @@ def flatten_authors_and_institutions(authorships: Sequence[dict]) -> Tuple[str, 
 
 
 def clean_html_fragment(text: str) -> str:
+    """Strip HTML tags/entities and normalize whitespace."""
     if not text:
         return ""
     decoded = unescape(text)
@@ -140,6 +145,7 @@ def clean_html_fragment(text: str) -> str:
 
 
 def _normalize_text_for_match(text: str) -> str:
+    """Normalize and lowercase text for equality checks ignoring punctuation."""
     if not text:
         return ""
     text = unicodedata.normalize("NFKD", text)
@@ -149,6 +155,7 @@ def _normalize_text_for_match(text: str) -> str:
 
 
 def _normalize_author_token(name: str) -> str:
+    """Produce a stable author token (surname or first token if comma style)."""
     if not name:
         return ""
     clean = unicodedata.normalize("NFKD", name)
@@ -162,6 +169,7 @@ def _normalize_author_token(name: str) -> str:
 
 
 def _author_tokens_from_string(authors: str) -> Set[str]:
+    """Tokenize ';'-separated author strings into normalized identifiers."""
     tokens: Set[str] = set()
     if not authors:
         return tokens
@@ -173,6 +181,7 @@ def _author_tokens_from_string(authors: str) -> Set[str]:
 
 
 def get_abstract_from_google_scholar(title: str, authors: str) -> Optional[str]:
+    """Look up a publication on Google Scholar via scholarly and return its abstract."""
     if scholarly is None or not title:
         return None
     normalized_target = _normalize_text_for_match(title)
@@ -242,6 +251,7 @@ def get_abstract_from_google_scholar(title: str, authors: str) -> Optional[str]:
 
 
 def abbreviate_authors(value: str) -> str:
+    """Return compact 'First Author et al.' preview for UI progress messages."""
     if not value:
         return ""
     authors = [part.strip() for part in value.split(";") if part.strip()]
@@ -431,6 +441,7 @@ def format_sdg_predictions(sdg_json: Optional[dict]) -> str:
 
 
 def sanitize_filename(value: str) -> str:
+    """Strip unsafe characters so the filename can be used on most OSes."""
     value = unicodedata.normalize("NFKD", value)
     value = re.sub(r"[^\w\-\.]+", "_", value, flags=re.UNICODE)
     return value.strip("_")
@@ -449,6 +460,7 @@ def fetch_works_with_sdg(
     progress_callback: ProgressHook = None,
     cancel_check: Optional[Callable[[], bool]] = None,
 ) -> Tuple[List[Dict[str, object]], FetchStats]:
+    """Main pipeline: fetch works page-by-page and enrich/cache SDG info."""
     params = {
         "filter": make_filter(ror_url, from_date, work_type, to_date),
         "select": "id,display_name,title,publication_date,doi,abstract_inverted_index,type,language,open_access,authorships",
@@ -467,10 +479,12 @@ def fetch_works_with_sdg(
     rows: List[Dict[str, Any]] = []
 
     def _ensure_not_cancelled() -> None:
+        """Raise if the caller requested cancellation."""
         if cancel_check and cancel_check():
             raise FetchCancelled()
 
     def emit_progress(message: str = "") -> None:
+        """Convenience wrapper for reporting progress up to the UI."""
         _ensure_not_cancelled()
         if progress_callback:
             progress_callback(stats.total_processed, stats.total_expected, message)
@@ -491,6 +505,7 @@ def fetch_works_with_sdg(
         next_cursor = (data.get("meta") or {}).get("next_cursor")
 
         def process_record(work: dict) -> None:
+            """Normalize/calculate every column for a single OpenAlex work."""
             nonlocal session
             _ensure_not_cancelled()
             openalex_id = work.get("id", "")

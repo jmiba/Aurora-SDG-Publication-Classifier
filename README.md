@@ -25,7 +25,7 @@ flowchart TB
     E -->|Yes| D
     E -->|No| F{Semantic Scholar via DOI}
     F -->|Found| D
-    F -->|Missing| G{Google Scholar fallback}
+    F -->|Missing| G{Google Scholar fallback}?
     G -->|Found| D
     G -->|Still missing| H[Use title for SDG]
     D --> I{SDG cached}

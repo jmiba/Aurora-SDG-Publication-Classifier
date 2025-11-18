@@ -254,9 +254,160 @@ def render_sdg_pie_chart(data: List[Tuple[str, float]], title: str):
     st.altair_chart(chart, width="stretch")
 
 
+def render_oa_ring_chart(rows: List[Dict[str, Any]]) -> None:
+    """Show a ring chart splitting publications by open access (True/False)."""
+    counts = {"Open access": 0, "Closed": 0}
+    truthy = {"1", "true", "yes", "y", "t"}
+    for row in rows:
+        is_oa = row.get("is_oa")
+        if isinstance(is_oa, bool):
+            counts["Open access" if is_oa else "Closed"] += 1
+            continue
+        if is_oa is None or is_oa == "":
+            counts["Closed"] += 1
+            continue
+        counts["Open access" if str(is_oa).strip().lower() in truthy else "Closed"] += 1
+    total = counts["Open access"] + counts["Closed"]
+    if total == 0:
+        st.info("No records contain an `is_oa` flag.")
+        return
+    chart_df = pd.DataFrame(
+        [
+            {"label": label, "count": value, "share": value / total}
+            for label, value in counts.items()
+            if value > 0
+        ]
+    )
+
+    colors = {"Open access": "#0c6b2f", "Closed": "#6b7280"}
+    chart = (
+        alt.Chart(chart_df)
+        .mark_arc(innerRadius=70)
+        .encode(
+            theta=alt.Theta("count:Q", title="Publications"),
+            color=alt.Color(
+                "label:N",
+                scale=alt.Scale(domain=list(colors.keys()), range=[colors[key] for key in colors]),
+                legend=alt.Legend(title="Access status", columns=1),
+            ),
+            tooltip=[
+                alt.Tooltip("label:N", title="Access"),
+                alt.Tooltip("count:Q", title="Publications"),
+                alt.Tooltip("share:Q", title="Share", format=".1%"),
+            ],
+        )
+        .properties(width=1650, height=450, title="Open access vs closed")
+    )
+    st.altair_chart(chart, width="stretch")
+
+
+def render_author_oa_chart(
+    rows: List[Dict[str, Any]], start_date: str, end_date: str, max_authors: int = 20
+) -> None:
+    """Show top authors by OA availability across the selected window."""
+    if not rows:
+        st.info("No publications available to display per-author OA status.")
+        return
+    df = pd.DataFrame(rows)
+    if df.empty:
+        st.info("No publications available to display per-author OA status.")
+        return
+
+    start_month = pd.to_datetime(start_date, errors="coerce")
+    end_month = pd.to_datetime(end_date, errors="coerce")
+    if pd.isna(start_month) or pd.isna(end_month):
+        st.info("Unable to determine the selected time frame for author distribution.")
+        return
+    start_month = start_month.to_period("M").to_timestamp()
+    end_month = end_month.to_period("M").to_timestamp()
+    if start_month > end_month:
+        start_month, end_month = end_month, start_month
+
+    if "publication_date" in df.columns:
+        df["pub_date"] = pd.to_datetime(df["publication_date"], errors="coerce")
+    else:
+        df["pub_date"] = pd.NaT
+    if df["pub_date"].isna().all() and "publication_year" in df.columns:
+        df["pub_date"] = pd.to_datetime(df["publication_year"].astype(str), format="%Y", errors="coerce")
+    df = df.dropna(subset=["pub_date"])
+    if df.empty:
+        st.info("No publications have a valid publication date for this time frame.")
+        return
+    df["pub_month"] = df["pub_date"].dt.to_period("M").dt.to_timestamp()
+    df = df[(df["pub_month"] >= start_month) & (df["pub_month"] <= end_month)]
+    if df.empty:
+        st.info("No publications fall within the selected publication period.")
+        return
+
+    if "authors" not in df.columns:
+        st.info("No author information available in these records.")
+        return
+    df["authors"] = df["authors"].fillna("").astype(str)
+    exploded = (
+        df.assign(author=df["authors"].str.split(";"))
+        .explode("author")
+        .assign(author=lambda d: d["author"].str.strip())
+    )
+    exploded = exploded[exploded["author"] != ""]
+    if exploded.empty:
+        st.info("No author information is available to build this chart.")
+        return
+    if "is_oa" not in exploded.columns:
+        exploded["is_oa"] = False
+    exploded["is_oa"] = exploded["is_oa"].astype(bool)
+    grouped = (
+        exploded.groupby(["author", "is_oa"], dropna=False)
+        .size()
+        .reset_index(name="count")
+    )
+    if grouped.empty:
+        st.info("No author publication counts available.")
+        return
+    grouped["oa_status"] = grouped["is_oa"].map({True: "Open access", False: "Closed"})
+    totals = grouped.groupby("author")["count"].sum().nlargest(max_authors)
+    grouped = grouped[grouped["author"].isin(totals.index)]
+    grouped["author"] = pd.Categorical(
+        grouped["author"], categories=totals.index.tolist(), ordered=True
+    )
+    ordered_statuses = ["Open access", "Closed"]
+    order_mapping = {status: idx for idx, status in enumerate(ordered_statuses)}
+    grouped["status_order"] = grouped["oa_status"].map(order_mapping)
+    color_range = ["#0c6b2f", "#6b7280"]
+
+    chart = (
+        alt.Chart(grouped)
+        .mark_bar()
+        .encode(
+            x=alt.X("count:Q", title="Publications", axis=alt.Axis(format="d")),
+            y=alt.Y(
+                "author:N",
+                title="Author",
+                sort=totals.index.tolist()[::-1],
+            ),
+            color=alt.Color(
+                "oa_status:N",
+                title="Open-Access status",
+                scale=alt.Scale(domain=ordered_statuses, range=color_range),
+            ),
+            order=alt.Order("status_order:Q", sort="descending"),
+            tooltip=[
+                alt.Tooltip("author:N", title="Author"),
+                alt.Tooltip("oa_status:N", title="OA status"),
+                alt.Tooltip("count:Q", title="Publications"),
+            ],
+        )
+        .properties(
+            width=1650,
+            height=max(300, 40 * len(totals)),
+            title=f"OA status distribution for top {len(totals)} authors",
+        )
+    )
+    st.altair_chart(chart, width="stretch")
+    st.caption("Authors ranked by number of publications in the selected period.")
+
+
 def render_oa_status_chart(rows: List[Dict[str, Any]], start_date: str, end_date: str):
     """Plot stacked OA status counts per month for the selected period."""
-    st.subheader("Publication volume by OA status", divider="blue")
     if not rows:
         st.info("No publications available in the selected time frame.")
         return
@@ -353,7 +504,6 @@ def render_oa_status_chart(rows: List[Dict[str, Any]], start_date: str, end_date
 
 def render_publication_type_chart(rows: List[Dict[str, Any]], start_date: str, end_date: str):
     """Render a pie chart showing publication types in the window."""
-    st.subheader("Publication types in selected period", divider="green")
     if not rows:
         st.info("No publications available to display publication types.")
         return
@@ -429,174 +579,6 @@ def render_publication_type_chart(rows: List[Dict[str, Any]], start_date: str, e
         )
     )
     st.altair_chart(chart, width="stretch")
-
-def render_oa_ring_chart(rows: List[Dict[str, Any]]) -> None:
-    """Show a ring chart splitting publications by open access (True/False)."""
-    st.subheader("OA distribution by author", divider="blue")
-    counts = {"Open access": 0, "Closed": 0}
-    truthy = {"1", "true", "yes", "y", "t"}
-    for row in rows:
-        is_oa = row.get("is_oa")
-        if isinstance(is_oa, bool):
-            counts["Open access" if is_oa else "Closed"] += 1
-            continue
-        if is_oa is None or is_oa == "":
-            counts["Closed"] += 1
-            continue
-        counts["Open access" if str(is_oa).strip().lower() in truthy else "Closed"] += 1
-    total = counts["Open access"] + counts["Closed"]
-    if total == 0:
-        st.info("No records contain an `is_oa` flag.")
-        return
-    chart_df = pd.DataFrame(
-        [
-            {"label": label, "count": value, "share": value / total}
-            for label, value in counts.items()
-            if value > 0
-        ]
-    )
-    
-    colors = {"Open access": "#0c6b2f", "Closed": "#6b7280"}
-    chart = (
-        alt.Chart(chart_df)
-        .mark_arc(innerRadius=70)
-        .encode(
-            theta=alt.Theta("count:Q", title="Publications"),
-            color=alt.Color(
-                "label:N",
-                scale=alt.Scale(domain=list(colors.keys()), range=[colors[key] for key in colors]),
-                legend=alt.Legend(title="Access status", columns=1),
-            ),
-            tooltip=[
-                alt.Tooltip("label:N", title="Access"),
-                alt.Tooltip("count:Q", title="Publications"),
-                alt.Tooltip("share:Q", title="Share", format=".1%"),
-            ],
-        )
-        .properties(width=1650, height=450, title="Open access vs closed")
-    )
-    st.altair_chart(chart, width="stretch")
-
-def render_author_oa_chart(rows: List[Dict[str, Any]], start_date: str, end_date: str, max_authors: int = 20):
-    """Show top authors by OA availability across the selected window."""
-    st.subheader("OA distribution by author", divider="blue")
-    if not rows:
-        st.info("No publications available to display per-author OA status.")
-        return
-    df = pd.DataFrame(rows)
-    if df.empty:
-        st.info("No publications available to display per-author OA status.")
-        return
-
-    start_month = pd.to_datetime(start_date, errors="coerce")
-    end_month = pd.to_datetime(end_date, errors="coerce")
-    if pd.isna(start_month) or pd.isna(end_month):
-        st.info("Unable to determine the selected time frame for author distribution.")
-        return
-    start_month = start_month.to_period("M").to_timestamp()
-    end_month = end_month.to_period("M").to_timestamp()
-    if start_month > end_month:
-        start_month, end_month = end_month, start_month
-
-    if "publication_date" in df.columns:
-        df["pub_date"] = pd.to_datetime(df["publication_date"], errors="coerce")
-    else:
-        df["pub_date"] = pd.NaT
-    if df["pub_date"].isna().all() and "publication_year" in df.columns:
-        df["pub_date"] = pd.to_datetime(df["publication_year"].astype(str), format="%Y", errors="coerce")
-    df = df.dropna(subset=["pub_date"])
-    if df.empty:
-        st.info("No publications have a valid publication date for this time frame.")
-        return
-    df["pub_month"] = df["pub_date"].dt.to_period("M").dt.to_timestamp()
-    df = df[(df["pub_month"] >= start_month) & (df["pub_month"] <= end_month)]
-    if df.empty:
-        st.info("No publications fall within the selected publication period.")
-        return
-
-    if "authors" not in df.columns:
-        st.info("No author information available in these records.")
-        return
-    df["authors"] = df["authors"].fillna("").astype(str)
-    author_df = df.assign(author=df["authors"].str.split(";")).explode("author")
-    author_df["author"] = author_df["author"].astype(str).str.strip()
-    author_df = author_df[author_df["author"] != ""]
-    if author_df.empty:
-        st.info("No author names available to build the OA distribution.")
-        return
-
-    if "oa_status" not in author_df.columns:
-        author_df["oa_status"] = "unknown"
-    else:
-        author_df["oa_status"] = author_df["oa_status"].fillna("unknown")
-        author_df.loc[author_df["oa_status"].astype(str).str.strip() == "", "oa_status"] = "unknown"
-
-    grouped = (
-        author_df.groupby(["author", "oa_status"], dropna=False)
-        .size()
-        .reset_index(name="count")
-    )
-    if grouped.empty:
-        st.info("No author data available to render OA status distribution.")
-        return
-
-    totals = (
-        grouped.groupby("author", as_index=False)["count"]
-        .sum()
-        .sort_values("count", ascending=False)
-    )
-    top_authors = totals.head(max_authors)
-    if top_authors.empty:
-        st.info("No authors qualify for the OA distribution chart.")
-        return
-    chart_df = grouped.merge(
-        top_authors.rename(columns={"count": "total"}),
-        on="author",
-        how="inner",
-    )
-    chart_df = chart_df.sort_values(["total", "author"], ascending=[False, True])
-    author_order = top_authors["author"].tolist()
-    status_values = sorted(chart_df["oa_status"].unique())
-    ordered_statuses = [
-        *[status for status in OA_STATUS_ORDER if status in status_values],
-        *[status for status in status_values if status not in OA_STATUS_ORDER],
-    ]
-    order_mapping = {status: idx for idx, status in enumerate(ordered_statuses)}
-    chart_df["status_order"] = chart_df["oa_status"].map(order_mapping).fillna(len(order_mapping)).astype(int)
-    color_range = [OA_STATUS_COLORS.get(status, "#94a3b8") for status in ordered_statuses]
-
-    base_height = 40 * max(1, len(author_order))
-    chart = (
-        alt.Chart(chart_df)
-        .mark_bar()
-        .encode(
-            x=alt.X("count:Q", title="Publications", axis=alt.Axis(format="d")),
-            y=alt.Y(
-                "author:N",
-                title="Author",
-                sort=author_order[::-1],
-            ),
-            color=alt.Color(
-                "oa_status:N",
-                title="Open-Access status",
-                scale=alt.Scale(domain=ordered_statuses, range=color_range),
-            ),
-            order=alt.Order("status_order:Q", sort="descending"),
-            tooltip=[
-                alt.Tooltip("author:N", title="Author"),
-                alt.Tooltip("oa_status:N", title="OA status"),
-                alt.Tooltip("count:Q", title="Publications"),
-            ],
-        )
-        .properties(
-            width=1650,
-            height=max(300, base_height),
-            title=f"OA status distribution for top {len(author_order)} authors",
-        )
-    )
-    st.altair_chart(chart, width="stretch")
-    st.caption("Authors ranked by number of publications in the selected period.")
-
 
 def build_output_filename(
     ror_url: str,
@@ -1202,14 +1184,18 @@ def main():
         chart_title = f"selected publication ({selected_title})"
     render_sdg_pie_chart(chart_data, f"SDGs in {chart_title}")
     st.write("")
+    st.subheader("OA distribution by author", divider="violet")
     render_author_oa_chart(all_rows, from_date_str, to_date_str)
     st.write("")
+    st.subheader("Open Access - cosed access ratio", divider="blue")
     render_oa_ring_chart(chart_rows)
     st.write("")
+    st.subheader("Publication volume by OA status", divider="green")
     render_oa_status_chart(all_rows, from_date_str, to_date_str)
     st.write("")
+    st.subheader("Publication types in selected period", divider="yellow")
     render_publication_type_chart(all_rows, from_date_str, to_date_str)
-
+    
     st.write("")
     st.divider()
     st.header("Download data set", divider="rainbow")
