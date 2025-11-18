@@ -98,6 +98,7 @@ div[data-testid="stDataFrame"] div[role="checkbox"] input[type="checkbox"]:check
 
 
 def _load_secrets() -> Dict[str, Any]:
+    """Load secrets from Streamlit or fallback TOML files once per process."""
     if _SECRETS:
         return _SECRETS
     try:
@@ -125,6 +126,7 @@ def _load_secrets() -> Dict[str, Any]:
 
 
 def get_secret_text(name: str) -> Optional[str]:
+    """Return a string secret (supports dotted section.key names)."""
     if "." in name:
         section, key = name.split(".", 1)
         raw_value = (_load_secrets().get(section) or {}).get(key)
@@ -139,6 +141,7 @@ def get_secret_text(name: str) -> Optional[str]:
 
 
 def get_secret_bool(name: str) -> Optional[bool]:
+    """Interpret a secret value as a boolean if possible."""
     text = get_secret_text(name)
     if text is None:
         return None
@@ -151,6 +154,7 @@ def get_secret_bool(name: str) -> Optional[bool]:
 
 
 def resolve_user_agent() -> Tuple[str, bool]:
+    """Return the HTTP user agent and flag whether it came from secrets."""
     secret_value = get_secret_text(SECRET_HTTP_USER_AGENT)
     if secret_value:
         return secret_value.strip(), True
@@ -158,10 +162,12 @@ def resolve_user_agent() -> Tuple[str, bool]:
 
 
 def resolve_semantic_scholar_key() -> Optional[str]:
+    """Read the Semantic Scholar API key (if supplied)."""
     return get_secret_text(SECRET_SEMANTIC_SCHOLAR_KEY)
 
 
 def resolve_google_scholar_enabled() -> bool:
+    """Decide whether Google Scholar lookups are allowed."""
     value = get_secret_bool(SECRET_GOOGLE_SCHOLAR_ENABLED)
     if value is None:
         return True
@@ -174,6 +180,7 @@ def build_preview_rows(
     limit: int = 20,
     offset: int = 0,
 ) -> List[Dict[str, str]]:
+    """Create a lightweight list of dictionaries for the preview table."""
     preview: List[Dict[str, str]] = []
     subset = rows[offset : offset + max(limit, 0)]
     for row in subset:
@@ -182,6 +189,7 @@ def build_preview_rows(
 
 
 def abbreviate_authors(value: str) -> str:
+    """Return 'First Author et al.' style preview for long author lists."""
     if not value:
         return ""
     authors = [part.strip() for part in value.split(";") if part.strip()]
@@ -193,6 +201,7 @@ def abbreviate_authors(value: str) -> str:
 
 
 def parse_sdg_formatted(value: str) -> List[Tuple[str, float, str]]:
+    """Parse the stored SDG formatted string into tuples."""
     entries: List[Tuple[str, float, str]] = []
     if not value:
         return entries
@@ -208,6 +217,7 @@ def parse_sdg_formatted(value: str) -> List[Tuple[str, float, str]]:
 
 
 def aggregate_sdg_counts(rows: List[Dict[str, Any]]) -> List[Tuple[str, float]]:
+    """Combine SDG percentages across all rows for chart rendering."""
     totals: Dict[str, float] = {}
     for row in rows:
         formatted = row.get("sdg_formatted") or ""
@@ -222,6 +232,7 @@ def aggregate_sdg_counts(rows: List[Dict[str, Any]]) -> List[Tuple[str, float]]:
 
 
 def render_sdg_pie_chart(data: List[Tuple[str, float]], title: str):
+    """Display an Altair donut chart summarizing SDG distribution."""
     if not data:
         st.info(f"No SDG predictions available for {title.lower()}.")
         return
@@ -244,6 +255,7 @@ def render_sdg_pie_chart(data: List[Tuple[str, float]], title: str):
 
 
 def render_oa_status_chart(rows: List[Dict[str, Any]], start_date: str, end_date: str):
+    """Plot stacked OA status counts per month for the selected period."""
     st.subheader("Publication volume by OA status", divider="blue")
     if not rows:
         st.info("No publications available in the selected time frame.")
@@ -340,6 +352,7 @@ def render_oa_status_chart(rows: List[Dict[str, Any]], start_date: str, end_date
 
 
 def render_publication_type_chart(rows: List[Dict[str, Any]], start_date: str, end_date: str):
+    """Render a pie chart showing publication types in the window."""
     st.subheader("Publication types in selected period", divider="green")
     if not rows:
         st.info("No publications available to display publication types.")
@@ -417,9 +430,56 @@ def render_publication_type_chart(rows: List[Dict[str, Any]], start_date: str, e
     )
     st.altair_chart(chart, width="stretch")
 
+def render_oa_ring_chart(rows: List[Dict[str, Any]]) -> None:
+    """Show a ring chart splitting publications by open access (True/False)."""
+    st.subheader("OA distribution by author", divider="blue")
+    counts = {"Open access": 0, "Closed": 0}
+    truthy = {"1", "true", "yes", "y", "t"}
+    for row in rows:
+        is_oa = row.get("is_oa")
+        if isinstance(is_oa, bool):
+            counts["Open access" if is_oa else "Closed"] += 1
+            continue
+        if is_oa is None or is_oa == "":
+            counts["Closed"] += 1
+            continue
+        counts["Open access" if str(is_oa).strip().lower() in truthy else "Closed"] += 1
+    total = counts["Open access"] + counts["Closed"]
+    if total == 0:
+        st.info("No records contain an `is_oa` flag.")
+        return
+    chart_df = pd.DataFrame(
+        [
+            {"label": label, "count": value, "share": value / total}
+            for label, value in counts.items()
+            if value > 0
+        ]
+    )
+    
+    colors = {"Open access": "#0c6b2f", "Closed": "#6b7280"}
+    chart = (
+        alt.Chart(chart_df)
+        .mark_arc(innerRadius=70)
+        .encode(
+            theta=alt.Theta("count:Q", title="Publications"),
+            color=alt.Color(
+                "label:N",
+                scale=alt.Scale(domain=list(colors.keys()), range=[colors[key] for key in colors]),
+                legend=alt.Legend(title="Access status", columns=1),
+            ),
+            tooltip=[
+                alt.Tooltip("label:N", title="Access"),
+                alt.Tooltip("count:Q", title="Publications"),
+                alt.Tooltip("share:Q", title="Share", format=".1%"),
+            ],
+        )
+        .properties(width=1650, height=450, title="Open access vs closed")
+    )
+    st.altair_chart(chart, width="stretch")
 
 def render_author_oa_chart(rows: List[Dict[str, Any]], start_date: str, end_date: str, max_authors: int = 20):
-    st.subheader("OA distribution by author", divider="violet")
+    """Show top authors by OA availability across the selected window."""
+    st.subheader("OA distribution by author", divider="blue")
     if not rows:
         st.info("No publications available to display per-author OA status.")
         return
@@ -546,6 +606,7 @@ def build_output_filename(
     to_date: Optional[str],
     limit_rows: Optional[int],
 ) -> str:
+    """Generate a descriptive filename that encodes filters and limits."""
     ror_tail = ror_url.rstrip("/").split("/")[-1]
     type_part = wtype or "all"
     model_part = model if model != "skip" else "no-sdg"
@@ -558,6 +619,7 @@ def build_output_filename(
 
 
 def rows_to_csv_bytes(rows: List[Dict[str, Any]]) -> bytes:
+    """Serialize result rows into UTF-8 encoded CSV bytes."""
     buffer = io.StringIO()
     writer = csv.DictWriter(buffer, fieldnames=CSV_FIELDNAMES)
     writer.writeheader()
@@ -568,6 +630,7 @@ def rows_to_csv_bytes(rows: List[Dict[str, Any]]) -> bytes:
 
 
 def _excel_col_name(idx: int) -> str:
+    """Convert a zero-based index to Excel-style column letters."""
     name = ""
     while idx >= 0:
         idx, remainder = divmod(idx, 26)
@@ -577,6 +640,7 @@ def _excel_col_name(idx: int) -> str:
 
 
 def rows_to_excel_bytes(rows: List[Dict[str, Any]], columns: Optional[List[str]] = None) -> bytes:
+    """Write rows to an XLSX workbook without bringing in pandas/excel libs."""
     columns = columns or CSV_FIELDNAMES
     if not columns:
         columns = list({key for row in rows for key in row.keys()})
@@ -680,6 +744,7 @@ def rows_to_excel_bytes(rows: List[Dict[str, Any]], columns: Optional[List[str]]
 
 
 def render_institution_selector(user_agent: str) -> Optional[str]:
+    """Show the ROR search box and return the selected ROR URL (if any)."""
     st.header("Query setup", divider="rainbow")
     st.subheader("1. Institution", divider="violet")
 
@@ -737,6 +802,7 @@ def render_institution_selector(user_agent: str) -> Optional[str]:
 
 
 def render_publication_type_selector() -> Optional[str]:
+    """Display the publication-type selectbox and return the chosen filter."""
     st.subheader("2. Publication type", divider="blue")
     types = [
         "article",
@@ -759,6 +825,7 @@ def render_publication_type_selector() -> Optional[str]:
 
 
 def render_model_selector() -> str:
+    """Let the user pick which SDG classifier to run."""
     st.subheader("3. SDG classifier", divider="green")
     desc_only = [desc for _, desc in AURORA_MODELS]
     default_index = next((i for i, (name, _) in enumerate(AURORA_MODELS) if name == "aurora-sdg-multi"), 0)
@@ -770,6 +837,7 @@ def render_advanced_options(
     semantic_key_from_secret: Optional[str],
     default_from_secret: Optional[str],
 ) -> Tuple[str, str, Optional[int]]:
+    """Render additional filters (date range, record limit, info callouts)."""
     st.subheader("4. Advanced options", divider="yellow")
     today = datetime.today().date().replace(day=1)
     start_str = default_from_secret or "2023-01-01"
@@ -827,7 +895,23 @@ def render_advanced_options(
     return from_date.strftime("%Y-%m-%d"), to_date.strftime("%Y-%m-%d"), (limit_value or None)
 
 
+def _reset_fetch_state(
+    progress_bar: Any,
+    progress_text: Any,
+    progress_detail: Any,
+    cancel_container: Any,
+) -> None:
+    """Clear progress UI placeholders and reset fetch session flags."""
+    progress_bar.empty()
+    progress_text.empty()
+    progress_detail.empty()
+    cancel_container.empty()
+    st.session_state["fetch_in_progress"] = False
+    st.session_state["fetch_cancel_requested"] = False
+
+
 def main():
+    """Streamlit entry point that wires all widgets, fetch flow, and previews."""
     st.set_page_config(page_title="Aurora SDG Publication Classifier", layout="wide")
     st.title("Aurora SDG Publication Classifier")
     st.caption(
@@ -886,7 +970,7 @@ def main():
     if st.session_state.get("fetch_in_progress"):
         if cancel_container.button("Cancel fetch", type="secondary"):
             st.session_state["fetch_cancel_requested"] = True
-            st.toast("Cancelling fetch…", icon="⏹️")
+            st.toast("Cancelling fetch…", icon=":material/stop_circle:")
 
     run_button = st.button("Fetch works and build CSV", type="primary")
     if run_button:
@@ -948,39 +1032,19 @@ def main():
                     cancel_check=cancel_check,
                 )
             except FetchCancelled:
-                progress_bar.empty()
-                progress_text.empty()
-                progress_detail.empty()
-                st.session_state["fetch_in_progress"] = False
-                st.session_state["fetch_cancel_requested"] = False
-                cancel_container.empty()
+                _reset_fetch_state(progress_bar, progress_text, progress_detail, cancel_container)
                 st.info("Fetch cancelled.", icon="⏹️")
                 return
             except requests.HTTPError as exc:
-                progress_bar.empty()
-                progress_text.empty()
-                progress_detail.empty()
-                st.session_state["fetch_in_progress"] = False
-                st.session_state["fetch_cancel_requested"] = False
-                cancel_container.empty()
+                _reset_fetch_state(progress_bar, progress_text, progress_detail, cancel_container)
                 st.error(f"Request failed: {exc}")
                 return
             except requests.RequestException as exc:
-                progress_bar.empty()
-                progress_text.empty()
-                progress_detail.empty()
-                st.session_state["fetch_in_progress"] = False
-                st.session_state["fetch_cancel_requested"] = False
-                cancel_container.empty()
+                _reset_fetch_state(progress_bar, progress_text, progress_detail, cancel_container)
                 st.error(f"Network error: {exc}")
                 return
 
-        progress_bar.empty()
-        progress_text.empty()
-        progress_detail.empty()
-        st.session_state["fetch_in_progress"] = False
-        st.session_state["fetch_cancel_requested"] = False
-        cancel_container.empty()
+        _reset_fetch_state(progress_bar, progress_text, progress_detail, cancel_container)
         csv_bytes = rows_to_csv_bytes(rows)
         result_payload = {
             "csv_bytes": csv_bytes,
@@ -1001,15 +1065,17 @@ def main():
     filename: str = result_payload["filename"]
     rows: Optional[List[Dict[str, Any]]] = result_payload.get("rows")
 
-    success = (f"Wrote **{stats.total_processed:,}** rows. "
+    gs_note = (
+        f"; retrieved from Google Scholar: **{stats.gs_abstract_retrieved:,}**."
+        if google_scholar_enabled
+        else "."
+    )
+    st.success(
+        f"Wrote **{stats.total_processed:,}** rows. "
         f"OpenAlex missing abstracts: **{stats.openalex_abstract_missing:,}**; "
-        f"retrieved from Semantic Scholar: **{stats.ss_abstract_retrieved:,}**")
-    if google_scholar_enabled: 
-        success += f"; retrieved from Google Scholar: **{stats.gs_abstract_retrieved:,}**."
-    else:
-        success += "."
-        
-    st.success(success)
+        f"retrieved from Semantic Scholar: **{stats.ss_abstract_retrieved:,}**"
+        f"{gs_note}"
+    )
     if rows is None:
         try:
             csv_text = csv_bytes.decode("utf-8")
@@ -1138,6 +1204,8 @@ def main():
     st.write("")
     render_author_oa_chart(all_rows, from_date_str, to_date_str)
     st.write("")
+    render_oa_ring_chart(chart_rows)
+    st.write("")
     render_oa_status_chart(all_rows, from_date_str, to_date_str)
     st.write("")
     render_publication_type_chart(all_rows, from_date_str, to_date_str)
@@ -1145,6 +1213,7 @@ def main():
     st.write("")
     st.divider()
     st.header("Download data set", divider="rainbow")
+    st.info("Donwload the full data set as Excel or CSV for further analysis using [OpenRefine](https://openrefine.org) or other tools.", icon=":material/file_download:")
     export_rows = rows or all_rows
     excel_bytes = rows_to_excel_bytes(export_rows, CSV_FIELDNAMES) if export_rows else None
     if excel_bytes:
