@@ -13,7 +13,11 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 import requests
 
-# scholarly import and its associated function are removed
+try:
+    from scholarly import ProxyGenerator, scholarly  # type: ignore
+except Exception:  # pragma: no cover - optional dependency at runtime
+    ProxyGenerator = None
+    scholarly = None
 
 from cache_db import (
     get_cached_sdg_result,
@@ -217,37 +221,58 @@ def get_abstract_from_serpapi_google_scholar(
             time.sleep(pause * attempt)
     return None
 
-    params = {
-        "engine": "google_scholar",
-        "q": query,
-        "api_key": api_key,
-        "hl": "en", # Host language for results
-        "num": 5, # Number of results, usually enough to find the paper
-    }
+def get_abstract_from_scholarly(
+    title: str,
+    authors: str,
+    retries: int = 2,
+    pause: float = 1.0,
+) -> Optional[str]:
+    """Fetch an abstract via scholarly using FreeProxies when SerpApi is unavailable."""
+    if not title or scholarly is None or ProxyGenerator is None:
+        return None
 
+    query = f"{title} {authors}" if authors else title
+    if not query:
+        return None
+
+    try:
+        pg = ProxyGenerator()
+        proxy_ok = pg.FreeProxies()
+        if proxy_ok:
+            scholarly.use_proxy(pg)
+    except Exception as exc:  # pragma: no cover - network/proxy dependent
+        logging.warning("scholarly FreeProxies setup failed: %s", exc)
+
+    target_title = _normalize_text_for_match(title)
     for attempt in range(1, retries + 1):
         try:
-            resp = session.get(SERPAPI_GS_API, params=params, timeout=20)
-            if resp.status_code == 429: # Rate limit
-                time.sleep(pause * attempt)
-                continue
-            resp.raise_for_status()
-            data = resp.json()
-
-            for result in data.get("organic_results", []):
-                result_title = result.get("title")
-                # Basic title match to ensure we're looking at the right paper
-                if result_title and _normalize_text_for_match(result_title) == _normalize_text_for_match(title):
-                    abstract = result.get("snippet") # SerpApi often provides abstract in 'snippet'
-                    if abstract:
-                        logging.info("Serpapi Google Scholar abstract retrieved for '%s'", title)
-                        return clean_html_fragment(abstract)
-
-            logging.info("Serpapi Google Scholar abstract not found for '%s'", title)
+            results = scholarly.search_pubs(query)  # type: ignore[arg-type]
+            for _ in range(5):  # look at a few candidates
+                try:
+                    candidate = next(results)
+                except StopIteration:
+                    break
+                cand_title = candidate.get("bib", {}).get("title") or candidate.get("name")
+                if not cand_title:
+                    continue
+                norm_candidate = _normalize_text_for_match(cand_title)
+                if not (norm_candidate.startswith(target_title) or target_title.startswith(norm_candidate)):
+                    continue
+                try:
+                    filled = scholarly.fill(candidate)  # type: ignore[arg-type]
+                except Exception as fill_exc:  # pragma: no cover - external call
+                    logging.debug("scholarly.fill failed: %s", fill_exc)
+                    continue
+                abstract = (
+                    filled.get("abstract")
+                    or (filled.get("bib") or {}).get("abstract")
+                )
+                if abstract:
+                    logging.info("scholarly abstract retrieved for '%s'", title)
+                    return clean_html_fragment(abstract)
             return None
-
-        except requests.RequestException as exc:
-            logging.warning(f"Serpapi call failed for '{title}' (attempt {attempt}): {exc}")
+        except Exception as exc:  # pragma: no cover - external call
+            logging.warning("scholarly search failed (attempt %s): %s", attempt, exc)
             if attempt == retries:
                 return None
             time.sleep(pause * attempt)
@@ -545,12 +570,18 @@ def fetch_works_with_sdg(
                         abstract_text = ss_abstract
                         stats.ss_abstract_retrieved += 1
             if enable_google_scholar and not abstract_text:
-                serpapi_abstract = get_abstract_from_serpapi_google_scholar(
-                    title, authors_str, api_key=serpapi_api_key, session=session
-                )
-                if serpapi_abstract:
-                    abstract_text = serpapi_abstract
-                    stats.gs_abstract_retrieved += 1
+                if serpapi_api_key:
+                    serpapi_abstract = get_abstract_from_serpapi_google_scholar(
+                        title, authors_str, api_key=serpapi_api_key, session=session
+                    )
+                    if serpapi_abstract:
+                        abstract_text = serpapi_abstract
+                        stats.gs_abstract_retrieved += 1
+                else:
+                    scholarly_abs = get_abstract_from_scholarly(title, authors_str)
+                    if scholarly_abs:
+                        abstract_text = scholarly_abs
+                        stats.gs_abstract_retrieved += 1
             clean_cached_abs = clean_html_fragment(cached_abstract)
             abstract_text = clean_html_fragment(abstract_text)
             abstract_updated = bool(abstract_text and abstract_text != clean_cached_abs)
