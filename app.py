@@ -985,7 +985,10 @@ def main():
         if serpapi_api_key:
             st.info("Google Scholar abstract lookups enabled (via SerpApi).", icon=":material/check_circle:")
         else:
-            st.warning("Google Scholar abstract lookups enabled, but `serpapi_api_key` not set. Scholarly will be used which may be unreliable.")
+            st.warning(
+                "Google Scholar abstract lookups enabled, but `serpapi_api_key` not set. "
+                "Will fall back to scholarly with free proxies (less reliable and slower)."
+            )
 
     current_params = {
         "ror": ror_url,
