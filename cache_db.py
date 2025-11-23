@@ -41,6 +41,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
                 oa_status TEXT,
                 authors TEXT,
                 institutions TEXT,
+                institution_affiliations_json TEXT,
                 abstract TEXT,
                 raw_json TEXT,
                 updated_at TEXT
@@ -66,6 +67,12 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             ON sdg_results(model)
             """
         )
+        # Add new column if missing
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(works)")}
+        if "institution_affiliations_json" not in cols:
+            conn.execute(
+                "ALTER TABLE works ADD COLUMN institution_affiliations_json TEXT"
+            )
 
 
 def get_cached_work(openalex_id: str) -> Optional[Dict[str, Any]]:
@@ -92,6 +99,7 @@ def upsert_work(row: Dict[str, Any], raw_record: Optional[Dict[str, Any]] = None
         "oa_status": row.get("oa_status"),
         "authors": row.get("authors"),
         "institutions": row.get("institutions"),
+        "institution_affiliations_json": row.get("institution_affiliations_json"),
         "abstract": row.get("abstract"),
         "raw_json": json.dumps(raw_record, ensure_ascii=False) if raw_record else None,
         "updated_at": datetime.utcnow().isoformat(timespec="seconds"),

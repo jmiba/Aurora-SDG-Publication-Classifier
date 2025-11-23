@@ -2,6 +2,7 @@ import csv
 import io
 import math
 import re
+import itertools
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -10,6 +11,7 @@ from zipfile import ZipFile, ZIP_DEFLATED
 
 import altair as alt
 import pandas as pd
+import plotly.graph_objects as go
 import requests
 import streamlit as st
 import tomllib
@@ -54,6 +56,9 @@ CSV_FIELDNAMES = [
     "is_oa",
     "oa_status",
     "institutions",
+    "institution_ids",
+    "institution_countries",
+    "institution_names_raw",
     "abstract",
     "sdg_model",
     "sdg_response",
@@ -348,6 +353,191 @@ def render_oa_ring_chart(rows: List[Dict[str, Any]]) -> None:
     )
     st.altair_chart(chart, width="stretch")
 
+def render_institution_network(
+    rows: List[Dict[str, Any]],
+    start_date: str,
+    end_date: str,
+    max_nodes: int = 30,
+) -> None:
+    """Render a simple 3D co-affiliation network of institutions from the selected period."""
+    if not rows:
+        st.info("No publications available to display the co-affiliation network.")
+        return
+    df = pd.DataFrame(rows)
+    if df.empty:
+        st.info("No publications available to display the co-affiliation network.")
+        return
+
+    start_dt = pd.to_datetime(start_date, errors="coerce")
+    end_dt = pd.to_datetime(end_date, errors="coerce")
+    if pd.isna(start_dt) or pd.isna(end_dt):
+        st.info("Unable to determine the selected time frame for the network.")
+        return
+    if "publication_date" in df.columns:
+        df["pub_date"] = pd.to_datetime(df["publication_date"], errors="coerce")
+    else:
+        df["pub_date"] = pd.NaT
+    df = df.dropna(subset=["pub_date"])
+    if df.empty:
+        st.info("No publications have valid dates for the network.")
+        return
+    df = df[(df["pub_date"] >= start_dt) & (df["pub_date"] <= end_dt)]
+    if df.empty:
+        st.info("No publications fall within the selected time frame for the network.")
+        return
+
+    edge_counts: Dict[Tuple[str, str], int] = {}
+    inst_labels: Dict[str, str] = {}
+    inst_countries: Dict[str, str] = {}
+    for _, row in df.iterrows():
+        aff_json = row.get("institution_affiliations_json")
+        try:
+            affiliations = json.loads(aff_json) if aff_json else []
+        except Exception:
+            affiliations = []
+        # fallback: build from columns if json missing
+        if not affiliations:
+            raw_ids = str(row.get("institution_ids") or "").split(";")
+            raw_names = str(row.get("institution_names_raw") or row.get("institutions") or "").split(";")
+            raw_countries = str(row.get("institution_countries") or "").split(";")
+            affiliations = []
+            for idx, inst_id in enumerate(raw_ids):
+                inst_id = inst_id.strip()
+                if not inst_id:
+                    continue
+                name = raw_names[idx].strip() if idx < len(raw_names) else ""
+                country = raw_countries[idx].strip() if idx < len(raw_countries) else ""
+                affiliations.append({"id": inst_id, "name": name, "country": country})
+        unique_ids = []
+        for aff in affiliations:
+            inst_id = aff.get("id") or ""
+            if not inst_id:
+                continue
+            if inst_id not in unique_ids:
+                unique_ids.append(inst_id)
+            name = aff.get("name") or ""
+            country = (aff.get("country") or "").upper()
+            if name:
+                inst_labels.setdefault(inst_id, name)
+            if country:
+                inst_countries.setdefault(inst_id, country)
+        if len(unique_ids) < 2:
+            continue
+        for a, b in itertools.combinations(sorted(unique_ids), 2):
+            edge_counts[(a, b)] = edge_counts.get((a, b), 0) + 1
+
+    if not edge_counts:
+        st.info("No co-affiliations found to build a network.")
+        return
+
+    # Collapse IDs that share the same label to avoid duplicate-looking nodes.
+    id_to_label: Dict[str, str] = {}
+    for inst_id in set(inst_labels.keys()) | set(inst_countries.keys()):
+        country = inst_countries.get(inst_id)
+        base_label = inst_labels.get(inst_id) or inst_id.split("/")[-1] or inst_id
+        if country:
+            base_label = f"{base_label} ({country})"
+        id_to_label[inst_id] = base_label
+
+    label_edge_counts: Dict[Tuple[str, str], int] = {}
+    for (a, b), w in edge_counts.items():
+        la = id_to_label.get(a, a)
+        lb = id_to_label.get(b, b)
+        if la == lb:
+            continue
+        key = tuple(sorted((la, lb)))
+        label_edge_counts[key] = label_edge_counts.get(key, 0) + w
+
+    if not label_edge_counts:
+        st.info("No co-affiliations found to build a network.")
+        return
+
+    degree: Dict[str, int] = {}
+    for (a, b), w in label_edge_counts.items():
+        degree[a] = degree.get(a, 0) + w
+        degree[b] = degree.get(b, 0) + w
+
+    # Limit to top nodes by degree
+    top_nodes = set(sorted(degree, key=degree.get, reverse=True)[:max_nodes])
+    filtered_edges = {(a, b): w for (a, b), w in label_edge_counts.items() if a in top_nodes and b in top_nodes}
+    if not filtered_edges:
+        st.info("Co-affiliations exist but were filtered out by the top-n limit.")
+        return
+
+    # Simple 3D layout using random positions scaled by degree
+    import random
+    random.seed(42)
+    node_positions: Dict[str, Tuple[float, float, float]] = {}
+    for node in top_nodes:
+        node_positions[node] = (
+            random.uniform(-1, 1) * (1 + degree.get(node, 1) / max(degree.values())),
+            random.uniform(-1, 1) * (1 + degree.get(node, 1) / max(degree.values())),
+            random.uniform(-1, 1) * (1 + degree.get(node, 1) / max(degree.values())),
+        )
+
+    edge_x = []
+    edge_y = []
+    edge_z = []
+    edge_widths = []
+    for (a, b), w in filtered_edges.items():
+        x0, y0, z0 = node_positions[a]
+        x1, y1, z1 = node_positions[b]
+        edge_x += [x0, x1, None]
+        edge_y += [y0, y1, None]
+        edge_z += [z0, z1, None]
+        edge_widths.append(max(1.0, min(6.0, w)))
+
+    node_x = []
+    node_y = []
+    node_z = []
+    node_sizes = []
+    node_text = []
+    max_deg = max(degree.get(n, 1) for n in top_nodes)
+    for node in top_nodes:
+        x, y, z = node_positions[node]
+        node_x.append(x)
+        node_y.append(y)
+        node_z.append(z)
+        deg = degree.get(node, 1)
+        node_sizes.append(10 + (deg / max_deg) * 25)
+        base_label = node
+        node_text.append(f"{base_label} ({deg} co-affiliations)")
+
+    edge_trace = go.Scatter3d(
+        x=edge_x,
+        y=edge_y,
+        z=edge_z,
+        mode="lines",
+        line=dict(color="rgba(168,170,171, 0.8)", width=2),
+        hoverinfo="none",
+    )
+    node_trace = go.Scatter3d(
+        x=node_x,
+        y=node_y,
+        z=node_z,
+        mode="markers+text",
+        marker=dict(
+            size=node_sizes,
+            color=node_sizes,
+            colorscale=[[0, "#b4a4e8"], [1, "#4d1fe3"]],  # light violet to dark
+            showscale=True,
+            colorbar=dict(title="Degree"),
+            opacity=0.9,
+        ),
+        text=[txt.split(" (")[0] for txt in node_text],
+        textposition="top center",
+        textfont=dict(size=14, color="#000"),
+        hovertext=node_text,
+        hoverinfo="text",
+    )
+    fig = go.Figure(data=[edge_trace, node_trace])
+    fig.update_layout(
+        showlegend=False,
+        margin=dict(l=0, r=0, t=0, b=0),
+        scene=dict(xaxis=dict(visible=False), yaxis=dict(visible=False), zaxis=dict(visible=False)),
+    )
+    fig.update_layout(height=650)
+    st.plotly_chart(fig, use_container_width=True)
 
 def render_author_oa_chart(
     rows: List[Dict[str, Any]], start_date: str, end_date: str, max_authors: int = 20
@@ -1185,6 +1375,7 @@ def main():
 
             def set_page(target: int):
                 st.session_state["preview_page"] = max(1, min(total_pages, target))
+                st.rerun()
 
             if first_col.button("⏮ First", disabled=current_page == 1):
                 set_page(1)
@@ -1252,6 +1443,7 @@ def main():
         dropdown_default = (
             0 if selected_index is None else min(max(0, selected_index + 1), total_rows)
         )
+        prev_focus = st.session_state.get("preview_focus_index")
         selected_option = st.selectbox(
             "Focus publication",
             options=list(range(len(dropdown_options))),
@@ -1259,7 +1451,9 @@ def main():
             index=dropdown_default,
         )
         selected_index = selected_option - 1 if selected_option > 0 else None
-        st.session_state["preview_focus_index"] = selected_index
+        if selected_index != prev_focus:
+            st.session_state["preview_focus_index"] = selected_index
+            st.rerun()
 
         if selected_index is not None and 0 <= selected_index < len(all_rows):
             chart_rows = [all_rows[selected_index]]
@@ -1287,16 +1481,19 @@ def main():
         chart_title = f"selected publication ({selected_title})"
     render_sdg_pie_chart(chart_data, f"SDGs in {chart_title}")
     st.write("")
-    st.subheader("OA distribution by author", divider="violet")
+    st.subheader("Co-affiliation network", divider="violet")
+    render_institution_network(chart_rows, from_date_str, to_date_str)
+    st.write("")
+    st.subheader("OA distribution by author", divider="blue")
     render_author_oa_chart(all_rows, from_date_str, to_date_str)
     st.write("")
-    st.subheader("Open Access - cosed access ratio", divider="blue")
+    st.subheader("Open Access - cosed access ratio", divider="green")
     render_oa_ring_chart(chart_rows)
     st.write("")
-    st.subheader("Publication volume by OA status", divider="green")
+    st.subheader("Publication volume by OA status", divider="yellow")
     render_oa_status_chart(all_rows, from_date_str, to_date_str)
     st.write("")
-    st.subheader("Publication types in selected period", divider="yellow")
+    st.subheader("Publication types in selected period", divider="orange")
     render_publication_type_chart(all_rows, from_date_str, to_date_str)
     
     st.write("")

@@ -5,3 +5,5 @@ altair>=5.2
 scholarly>=1.7.11
 httpx<0.28.0  # Temporary fix for compatibility issues with scholarly proxy setup
 free-proxy==1.0.6  # Scholarly FreeProxies expects older API
+networkx>=3.0
+plotly>=5.22
