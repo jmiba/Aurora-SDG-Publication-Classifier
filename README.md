@@ -64,11 +64,16 @@ flowchart TB
 
 ## Getting started
 
-1. **Install dependencies**: `pip install -r requirements.txt`.
-2. **Configure secrets**: Create a file named `.streamlit/secrets.toml` and add your configuration. See the "Configuring secrets" section below for details.
-3. **Run the app**: `streamlit run app.py` from the project directory.
-4. **Use the interface**: Search for an institution, choose your options, and press “Fetch works and build CSV.” Progress bars will show the status.
-5. **Download your data**: After the fetch completes, you’ll see charts, a data preview, and buttons for Excel/CSV downloads.
+1. **Create a virtual environment (recommended)**
+   - `python3 -m venv .venv`
+   - Activate it:
+     - macOS/Linux: `source .venv/bin/activate`
+     - Windows (PowerShell): `./.venv/Scripts/Activate.ps1`
+2. **Install dependencies**: `pip install -r requirements.txt`.
+3. **Configure secrets**: Create a file named `.streamlit/secrets.toml` and add your configuration. See the "Configuring secrets" section below for details.
+4. **Run the app**: `streamlit run app.py` from the project directory.
+5. **Use the interface**: Search for an institution, choose your options, and press “Fetch works and build CSV.” Progress bars will show the status.
+6. **Download your data**: After the fetch completes, you’ll see charts, a data preview, and buttons for Excel/CSV downloads.
    - Without a SerpApi key, Google Scholar lookups rely on `scholarly` plus free proxies; this can be slower or less reliable than SerpApi.
 
 ## Configuring secrets
