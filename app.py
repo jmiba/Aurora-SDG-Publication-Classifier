@@ -360,6 +360,7 @@ def render_institution_network(
     end_date: str,
     selected_institution_id: Optional[str],
     max_nodes: int = 30,
+    min_second_level_weight: int = 2,
 ) -> None:
     """Render a simple 3D co-affiliation network of institutions from the selected period."""
     if not rows:
@@ -461,13 +462,23 @@ def render_institution_network(
             selected_institution_id.strip().split("/")[-1]
         )
     if selected_label:
-        filtered_by_selection = {
+        primary_edges = {
             edge: weight
             for edge, weight in label_edge_counts.items()
             if selected_label in edge
         }
-        if filtered_by_selection:
-            label_edge_counts = filtered_by_selection
+        neighbors: Set[str] = set()
+        for (a, b) in primary_edges.keys():
+            neighbors.update([a, b])
+        neighbors.discard(selected_label)
+        secondary_edges = {
+            edge: weight
+            for edge, weight in label_edge_counts.items()
+            if edge[0] in neighbors and edge[1] in neighbors and weight >= min_second_level_weight
+        }
+        combined = {**primary_edges, **secondary_edges}
+        if combined:
+            label_edge_counts = combined
 
     degree: Dict[str, int] = {}
     for (a, b), w in label_edge_counts.items():
