@@ -3,6 +3,7 @@ import io
 import math
 import re
 import itertools
+import json
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -357,6 +358,7 @@ def render_institution_network(
     rows: List[Dict[str, Any]],
     start_date: str,
     end_date: str,
+    selected_institution_id: Optional[str],
     max_nodes: int = 30,
 ) -> None:
     """Render a simple 3D co-affiliation network of institutions from the selected period."""
@@ -434,7 +436,7 @@ def render_institution_network(
     id_to_label: Dict[str, str] = {}
     for inst_id in set(inst_labels.keys()) | set(inst_countries.keys()):
         country = inst_countries.get(inst_id)
-        base_label = inst_labels.get(inst_id) or inst_id.split("/")[-1] or inst_id
+        base_label = inst_labels.get(inst_id) or inst_id.split('/')[-1] or inst_id
         if country:
             base_label = f"{base_label} ({country})"
         id_to_label[inst_id] = base_label
@@ -452,28 +454,53 @@ def render_institution_network(
         st.info("No co-affiliations found to build a network.")
         return
 
+    # If we have the selected institution in our labels, keep only edges attached to it.
+    selected_label = None
+    if selected_institution_id:
+        selected_label = id_to_label.get(selected_institution_id) or id_to_label.get(
+            selected_institution_id.strip().split("/")[-1]
+        )
+    if selected_label:
+        filtered_by_selection = {
+            edge: weight
+            for edge, weight in label_edge_counts.items()
+            if selected_label in edge
+        }
+        if filtered_by_selection:
+            label_edge_counts = filtered_by_selection
+
     degree: Dict[str, int] = {}
     for (a, b), w in label_edge_counts.items():
         degree[a] = degree.get(a, 0) + w
         degree[b] = degree.get(b, 0) + w
 
-    # Limit to top nodes by degree
+    # Limit to top nodes by degree, but ensure the selected node stays if present.
     top_nodes = set(sorted(degree, key=degree.get, reverse=True)[:max_nodes])
+    if selected_label and selected_label in degree:
+        top_nodes.add(selected_label)
     filtered_edges = {(a, b): w for (a, b), w in label_edge_counts.items() if a in top_nodes and b in top_nodes}
     if not filtered_edges:
         st.info("Co-affiliations exist but were filtered out by the top-n limit.")
         return
 
-    # Simple 3D layout using random positions scaled by degree
+    # Layout: keep selected at center (if present), scatter others randomly.
     import random
-    random.seed(42)
+
     node_positions: Dict[str, Tuple[float, float, float]] = {}
+    if selected_label and selected_label in top_nodes:
+        node_positions[selected_label] = (0.0, 0.0, 0.0)
+
+    rng = random.Random(42)
     for node in top_nodes:
-        node_positions[node] = (
-            random.uniform(-1, 1) * (1 + degree.get(node, 1) / max(degree.values())),
-            random.uniform(-1, 1) * (1 + degree.get(node, 1) / max(degree.values())),
-            random.uniform(-1, 1) * (1 + degree.get(node, 1) / max(degree.values())),
-        )
+        if node in node_positions:
+            continue
+        radius = 2.5 + rng.random() * 1.0
+        theta = rng.random() * 2 * math.pi
+        phi = rng.random() * math.pi  # 0..pi
+        x = radius * math.sin(phi) * math.cos(theta)
+        y = radius * math.sin(phi) * math.sin(theta)
+        z = radius * math.cos(phi) * 0.5
+        node_positions[node] = (x, y, z)
 
     edge_x = []
     edge_y = []
@@ -1482,7 +1509,7 @@ def main():
     render_sdg_pie_chart(chart_data, f"SDGs in {chart_title}")
     st.write("")
     st.subheader("Co-affiliation network", divider="violet")
-    render_institution_network(chart_rows, from_date_str, to_date_str)
+    render_institution_network(chart_rows, from_date_str, to_date_str, institution_id)
     st.write("")
     st.subheader("OA distribution by author", divider="blue")
     render_author_oa_chart(all_rows, from_date_str, to_date_str)
