@@ -587,7 +587,7 @@ def render_institution_network(
         ),
         text=[txt.split(" (")[0] for txt in node_text],
         textposition="top center",
-        textfont=dict(size=14, color="#000"),
+        textfont=dict(size=14),
         hovertext=node_text,
         hoverinfo="text",
     )
