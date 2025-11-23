@@ -19,6 +19,7 @@ from openalex_sdg import (
     DEFAULT_USER_AGENT,
     FetchCancelled,
     FetchStats,
+    fetch_institution_lineage,
     fetch_works_with_sdg,
     is_ror_url,
     is_openalex_institution_id,
@@ -772,8 +773,8 @@ def rows_to_excel_bytes(rows: List[Dict[str, Any]], columns: Optional[List[str]]
     return buffer.getvalue()
 
 
-def render_institution_selector(user_agent: str) -> Optional[str]:
-    """Show the institution search box and return the selected OpenAlex or ROR ID (if any)."""
+def render_institution_selector(user_agent: str) -> Tuple[Optional[str], bool]:
+    """Show the institution search box, lineage toggle, and return (institution_id, include_lineage)."""
     st.header("Query setup", divider="rainbow")
     st.subheader("1. Institution", divider="violet")
 
@@ -823,7 +824,11 @@ def render_institution_selector(user_agent: str) -> Optional[str]:
             selected = options.get(choice)
             if selected:
                 st.session_state["selected_institution_id"] = selected
-                return selected
+                # store full metadata for lineage use
+                st.session_state["selected_institution_meta"] = next(
+                    (item for item in search_results if (item.get("id") or item.get("ror")) == selected),
+                    {},
+                )
     elif search_ran:
         st.info("No matches found.")
 
@@ -832,12 +837,20 @@ def render_institution_selector(user_agent: str) -> Optional[str]:
         placeholder="https://openalex.org/I123456789 | https://ror.org/02msan859",
         value=st.session_state.get("selected_institution_id", ""),
     )
-
     if ror_input and (is_ror_url(ror_input) or is_openalex_institution_id(ror_input)):
         st.session_state["selected_institution_id"] = ror_input.strip()
-        return ror_input.strip()
-    return st.session_state.get("selected_institution_id")
+        st.session_state.pop("selected_institution_meta", None)
+        # fall through to checkbox/return below
 
+    include_lineage = st.checkbox(
+        "Include works from parent/child institutions (OpenAlex lineage)",
+        value=st.session_state.get("include_lineage", False),
+        help="If enabled, works from related institutions in the OpenAlex lineage list are included (when available).",
+        key="include_lineage_checkbox",
+    )
+    st.session_state["include_lineage"] = include_lineage
+    return st.session_state.get("selected_institution_id"), include_lineage
+    
 
 def render_publication_type_selector() -> Optional[str]:
     """Display the publication-type selectbox and return the chosen filter."""
@@ -953,7 +966,7 @@ def main():
     st.set_page_config(page_title="Aurora SDG Publication Classifier", layout="wide")
     st.title("Aurora SDG Publication Classifier")
     st.caption(
-        "Fetch publications for a institution, relate them to the 17 UN Sustainable Development Goals (SDGs) using the [Aurora SDG classifier](https://aurora-universities.eu/sdg-research/classify/), and export a CSV ready for analysis."
+        "Fetch publications for an institution, relate them to the 17 UN Sustainable Development Goals (SDGs) using the [Aurora SDG classifier](https://aurora-universities.eu/sdg-research/classify/), and export a CSV ready for analysis."
     )
 
     user_agent, has_user_agent_secret = resolve_user_agent()
@@ -968,9 +981,12 @@ def main():
             "for better API treatment."
         )
 
-    institution_id = render_institution_selector(user_agent)
+    institution_id, include_lineage = render_institution_selector(user_agent)
+    st.write("")
     publication_type = render_publication_type_selector()
+    st.write("")
     model = render_model_selector()
+    st.write("")
     semantic_scholar_key = resolve_semantic_scholar_key()
     google_scholar_enabled = resolve_google_scholar_enabled()
     serpapi_api_key = resolve_serpapi_key() # Retrieve SerpApi key
@@ -1061,6 +1077,13 @@ def main():
                 progress_detail.empty()
             progress_text.text(status)
 
+        lineage_ids: List[str] = []
+        if include_lineage:
+            cached_meta = st.session_state.get("selected_institution_meta") or {}
+            lineage_ids = [str(val) for val in cached_meta.get("lineage") or [] if val]
+            if not lineage_ids:
+                lineage_ids = fetch_institution_lineage(institution_id, user_agent=user_agent)
+
         filename = build_output_filename(
             institution_id,
             publication_type,
@@ -1086,6 +1109,7 @@ def main():
                     semantic_scholar_api_key=semantic_scholar_key,
                     enable_google_scholar=google_scholar_enabled,
                     serpapi_api_key=serpapi_api_key, # Pass SerpApi key
+                    extra_institution_ids=lineage_ids if include_lineage else None,
                     progress_callback=progress_callback,
                     cancel_check=cancel_check,
                 )
