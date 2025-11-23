@@ -4,6 +4,7 @@ import math
 import re
 import itertools
 import json
+import networkx as nx
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -501,29 +502,59 @@ def render_institution_network(
     if selected_label and selected_label in top_nodes:
         node_positions[selected_label] = (0.0, 0.0, 0.0)
 
-    rng = random.Random(42)
-    for node in top_nodes:
-        if node in node_positions:
-            continue
-        radius = 2.5 + rng.random() * 1.0
-        theta = rng.random() * 2 * math.pi
-        phi = rng.random() * math.pi  # 0..pi
-        x = radius * math.sin(phi) * math.cos(theta)
-        y = radius * math.sin(phi) * math.sin(theta)
-        z = radius * math.cos(phi) * 0.5
-        node_positions[node] = (x, y, z)
+    primary_neighbors: Set[str] = set()
+    if selected_label:
+        for a, b in filtered_edges.keys():
+            if a == selected_label:
+                primary_neighbors.add(b)
+            elif b == selected_label:
+                primary_neighbors.add(a)
+    secondary_nodes = set(top_nodes) - primary_neighbors - ({selected_label} if selected_label else set())
 
-    edge_x = []
-    edge_y = []
-    edge_z = []
-    edge_widths = []
+    # Use a spring layout to keep connected nodes closer together.
+    G = nx.Graph()
+    for node in top_nodes:
+        G.add_node(node)
+    for (a, b), w in filtered_edges.items():
+        G.add_edge(a, b, weight=w)
+
+    pos = nx.spring_layout(
+        G,
+        weight="weight",
+        dim=3,
+        center=(0, 0, 0),
+        seed=42,
+    )
+    if selected_label and selected_label in pos:
+        pos[selected_label] = [0.0, 0.0, 0.0]
+
+    node_positions = {
+        node: tuple((coords.tolist() if hasattr(coords, "tolist") else list(coords))[:3])
+        for node, coords in pos.items()
+    }
+
+    edge_traces = []
     for (a, b), w in filtered_edges.items():
         x0, y0, z0 = node_positions[a]
         x1, y1, z1 = node_positions[b]
-        edge_x += [x0, x1, None]
-        edge_y += [y0, y1, None]
-        edge_z += [z0, z1, None]
-        edge_widths.append(max(1.0, min(6.0, w)))
+        width = max(1.0, min(10.0, w * 2.0))
+        alpha = min(1.0, 0.5 + 0.2 * (w - 1))
+        mid_x = (x0 + x1) / 2
+        mid_y = (y0 + y1) / 2
+        mid_z = (z0 + z1) / 2
+        edge_color = f"rgba(93,93,93,{alpha})"
+        edge_traces.append(
+            go.Scatter3d(
+                x=[x0, x1, mid_x, None],
+                y=[y0, y1, mid_y, None],
+                z=[z0, z1, mid_z, None],
+                mode="lines",
+                line=dict(color=edge_color, width=width),
+                hoverinfo="text",
+                text=["", "", f"Co-authored works: {w}", ""],
+                hoverlabel=dict(bgcolor=edge_color, font=dict(color="#ffffff")),
+            )
+        )
 
     node_x = []
     node_y = []
@@ -541,14 +572,6 @@ def render_institution_network(
         base_label = node
         node_text.append(f"{base_label} ({deg} co-affiliations)")
 
-    edge_trace = go.Scatter3d(
-        x=edge_x,
-        y=edge_y,
-        z=edge_z,
-        mode="lines",
-        line=dict(color="rgba(168,170,171, 0.8)", width=2),
-        hoverinfo="none",
-    )
     node_trace = go.Scatter3d(
         x=node_x,
         y=node_y,
@@ -568,7 +591,7 @@ def render_institution_network(
         hovertext=node_text,
         hoverinfo="text",
     )
-    fig = go.Figure(data=[edge_trace, node_trace])
+    fig = go.Figure(data=edge_traces + [node_trace])
     fig.update_layout(
         showlegend=False,
         margin=dict(l=0, r=0, t=0, b=0),
