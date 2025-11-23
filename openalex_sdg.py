@@ -79,6 +79,12 @@ def is_ror_url(value: str) -> bool:
     """Lightweight validation for ROR URLs (https://ror.org/XXXXXXXXX)."""
     return bool(re.match(r"^https?://ror\.org/[0-9a-z]{9}$", value.strip(), flags=re.I))
 
+def is_openalex_institution_id(value: str) -> bool:
+    """Return True if the value looks like an OpenAlex institution ID/URL."""
+    return bool(
+        re.match(r"^(https?://openalex\.org/)?I[A-Z0-9]+$", value.strip(), flags=re.I)
+    )
+
 def search_institutions_by_name(
     name: str, user_agent: str = DEFAULT_USER_AGENT, limit: int = 10
 ) -> List[dict]:
@@ -290,13 +296,19 @@ def abbreviate_authors(value: str) -> str:
     return f"{authors[0]} et al."
 
 def make_filter(
-    ror_url: str,
+    institution_id: str,
     from_date: Optional[str],
     work_type: Optional[str],
     to_date: Optional[str] = None
 ) -> str:
+    inst_val = institution_id
+    if is_openalex_institution_id(inst_val):
+        inst_val = inst_val.strip().split("/")[-1]  # use short OpenAlex ID
+        inst_filter = f"institutions.id:{inst_val}"
+    else:
+        inst_filter = f"institutions.ror:{inst_val}"
     parts = [
-        f"institutions.ror:{ror_url}",
+        inst_filter,
         "is_paratext:false",
     ]
     if from_date:
@@ -473,7 +485,7 @@ def sanitize_filename(value: str) -> str:
     return value.strip("_")
 
 def fetch_works_with_sdg(
-    ror_url: str,
+    institution_id: str,
     from_date: str,
     work_type: Optional[str],
     model: str,
@@ -484,11 +496,11 @@ def fetch_works_with_sdg(
     enable_google_scholar: bool = True,
     serpapi_api_key: Optional[str] = None, # New parameter
     progress_callback: ProgressHook = None,
-    cancel_check: Optional[Callable[[], bool]] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
 ) -> Tuple[List[Dict[str, object]], FetchStats]:
     """Main pipeline: fetch works page-by-page and enrich/cache SDG info."""
     params = {
-        "filter": make_filter(ror_url, from_date, work_type, to_date),
+        "filter": make_filter(institution_id, from_date, work_type, to_date),
         "select": "id,display_name,title,publication_date,doi,abstract_inverted_index,type,language,open_access,authorships",
         "per-page": PER_PAGE,
         "cursor": "*",
@@ -702,6 +714,7 @@ __all__ = [
     "SERPAPI_GS_API",
     "fetch_works_with_sdg",
     "format_sdg_predictions",
+    "is_openalex_institution_id",
     "is_ror_url",
     "sanitize_filename",
     "search_institutions_by_name",
