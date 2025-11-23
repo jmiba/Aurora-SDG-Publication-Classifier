@@ -89,10 +89,6 @@ default_from_date = "2020-01-01"
 
 A sample file is included at `.streamlit/secrets.sample.toml`.
 
-## Privacy and data location
-
-All data is downloaded to your machine. The cache file `cache.sqlite3` lives beside the scripts and is ignored by git. You can delete it at any time to force a fresh fetch.
-
 ---
 
 Enjoy exploring how your institution’s publications map to the Sustainable Development Goals!
