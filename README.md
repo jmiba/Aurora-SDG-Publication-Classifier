@@ -1,10 +1,10 @@
 # Aurora SDG Publication Classifier
 
-This Streamlit app helps you explore publications from the OpenAlex database for any ROR (Research Organization Registry) institution. It pulls the metadata, enriches missing abstracts, runs them through Aurora’s Sustainable Development Goals (SDG) classifiers, and gives you immediate visual and downloadable results.
+This Streamlit app helps you explore publications from the OpenAlex database for any institution (with or without a ROR entry). It pulls the metadata, enriches missing abstracts, runs them through Aurora’s Sustainable Development Goals (SDG) classifiers, and gives you immediate visual and downloadable results.
 
 ## What you can do
 
-- **Search institutions**: Enter a name or paste a ROR URL (e.g. `https://ror.org/02msan859`).
+- **Search institutions**: Search the OpenAlex institution registry and pick a match, or paste a ROR/OpenAlex institution URL (e.g. `https://ror.org/02msan859` or `https://openalex.org/I123456789`).
 - **Set filters**: Choose publication types, SDG classifier models, time windows, and optional record limits.
 - **Fetch SDG predictions**: The app calls OpenAlex for metadata and Aurora for SDG scores. Everything is cached locally in `cache.sqlite3` to avoid redundant network calls.
 - **Enrich Abstracts**: If an abstract is missing in OpenAlex, the app automatically performs a fallback search against Semantic Scholar and Google Scholar (via SerpApi) to find it.
@@ -19,7 +19,7 @@ A live demo is available at [Streamlit Cloud - Aurora SDG Publicaton Classifier]
 
 ```mermaid
 flowchart TB
-    A[User picks ROR + options] --> B[Fetch OpenAlex works]
+    A[User picks institution + options] --> B[Fetch OpenAlex works]
     B --> C{Abstract available?}
     C -->|Yes| D[Use abstract for SDG classification]
     C -->|No| E{Cached abstract?}
@@ -43,7 +43,7 @@ flowchart TB
 
 ## How it works in the background
 
-1. **OpenAlex fetch**: We request the Works API using your selected ROR, date range, and publication type. The request uses a friendly User-Agent (set via `.streamlit/secrets.toml`) to comply with API guidelines.
+1. **OpenAlex fetch**: We request the Works API using your selected institution (OpenAlex ID or ROR), date range, and publication type. The request uses a friendly User-Agent (set via `.streamlit/secrets.toml`) to comply with API guidelines.
 2. **Caching**: Each returned record and SDG classification is stored in a local SQLite database (`cache.sqlite3`). When you rerun the query, previously fetched publications are loaded from the cache, so the Aurora SDG API is only contacted for new or uncached works.
 3. **SDG classification**: Depending on the model you pick, abstracts or titles are sent to the relevant Aurora endpoint. Short abstracts are skipped when the model requires a minimum length (e.g., the OSDG model).
 4. **Abstract enrichment**: If OpenAlex provides no abstract, we reuse any cached text, otherwise we perform a series of fallbacks:

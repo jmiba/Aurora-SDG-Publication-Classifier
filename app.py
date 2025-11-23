@@ -21,6 +21,7 @@ from openalex_sdg import (
     FetchStats,
     fetch_works_with_sdg,
     is_ror_url,
+    is_openalex_institution_id,
     sanitize_filename,
     search_institutions_by_name,
 )
@@ -627,7 +628,7 @@ def render_publication_type_chart(rows: List[Dict[str, Any]], start_date: str, e
     st.altair_chart(chart, width="stretch")
 
 def build_output_filename(
-    ror_url: str,
+    institution_id: str,
     wtype: Optional[str],
     model: str,
     from_date: str,
@@ -635,10 +636,10 @@ def build_output_filename(
     limit_rows: Optional[int],
 ) -> str:
     """Generate a descriptive filename that encodes filters and limits."""
-    ror_tail = ror_url.rstrip("/").split("/")[-1]
+    inst_tail = institution_id.rstrip("/").split("/")[-1]
     type_part = wtype or "all"
     model_part = model if model != "skip" else "no-sdg"
-    fname = f"openalex_{ror_tail}_{type_part}_{model_part}_{from_date}"
+    fname = f"openalex_{inst_tail}_{type_part}_{model_part}_{from_date}"
     if to_date and to_date != from_date:
         fname += f"_to{to_date}"
     if limit_rows:
@@ -772,7 +773,7 @@ def rows_to_excel_bytes(rows: List[Dict[str, Any]], columns: Optional[List[str]]
 
 
 def render_institution_selector(user_agent: str) -> Optional[str]:
-    """Show the ROR search box and return the selected ROR URL (if any)."""
+    """Show the institution search box and return the selected OpenAlex or ROR ID (if any)."""
     st.header("Query setup", divider="rainbow")
     st.subheader("1. Institution", divider="violet")
 
@@ -780,7 +781,7 @@ def render_institution_selector(user_agent: str) -> Optional[str]:
         search_query = st.text_input(
             "Search by institution name first", placeholder="Europa-Universität Viadrina"
         )
-        submitted = st.form_submit_button("Search ROR registry", type="primary")
+        submitted = st.form_submit_button("Search OpenAlex institutions", type="primary")
     search_results: Optional[List[dict]] = st.session_state.get("institution_search_results")
     search_ran = st.session_state.get("institution_search_ran", False)
     if submitted:
@@ -791,42 +792,51 @@ def render_institution_selector(user_agent: str) -> Optional[str]:
                 try:
                     search_results = search_institutions_by_name(search_query.strip(), user_agent=user_agent)
                 except requests.HTTPError as exc:
-                    st.error(f"ROR search failed: {exc}")
+                    st.error(f"Institution search failed: {exc}")
                     search_results = []
                 except requests.RequestException as exc:
-                    st.error(f"ROR search error: {exc}")
+                    st.error(f"Institution search error: {exc}")
                     search_results = []
             st.session_state["institution_search_results"] = search_results or []
             st.session_state["institution_search_ran"] = True
     search_results = st.session_state.get("institution_search_results")
     search_ran = st.session_state.get("institution_search_ran", False)
     if search_results:
-        options = {
-            f"{item.get('display_name', '—')} ({(item.get('country_code') or '').upper()}) — {item.get('ror', '—')}":
-            item.get("ror")
-            for item in search_results
-        }
-        choice = st.radio(
-            "Matches",
-            options=list(options.keys()),
-            key="institution_choice",
-        )
-        selected = options.get(choice)
-        if selected:
-            st.session_state["selected_ror"] = selected
-            return selected
+        options: Dict[str, str] = {}
+        for item in search_results:
+            inst_id = item.get("id") or item.get("ror")
+            if not inst_id:
+                continue
+            country = (item.get("country_code") or "").upper()
+            ror_val = item.get("ror")
+            tail = ror_val or inst_id
+            if not ror_val:
+                tail = f"{tail} [no ROR]"
+            label = f"{item.get('display_name', '—')} ({country}) — {tail}"
+            options[label] = inst_id
+        if options:
+            choice = st.radio(
+                "Matches",
+                options=list(options.keys()),
+                key="institution_choice",
+            )
+            selected = options.get(choice)
+            if selected:
+                st.session_state["selected_institution_id"] = selected
+                return selected
     elif search_ran:
         st.info("No matches found.")
 
     ror_input = st.text_input(
-        "…or enter a ROR URL directly (e.g., https://ror.org/02msan859)",
-        value=st.session_state.get("selected_ror", ""),
+        "…or enter an institution URL directly (OpenAlex institution or ROR)",
+        placeholder="https://openalex.org/I123456789 | https://ror.org/02msan859",
+        value=st.session_state.get("selected_institution_id", ""),
     )
 
-    if ror_input and is_ror_url(ror_input):
-        st.session_state["selected_ror"] = ror_input.strip()
+    if ror_input and (is_ror_url(ror_input) or is_openalex_institution_id(ror_input)):
+        st.session_state["selected_institution_id"] = ror_input.strip()
         return ror_input.strip()
-    return st.session_state.get("selected_ror")
+    return st.session_state.get("selected_institution_id")
 
 
 def render_publication_type_selector() -> Optional[str]:
@@ -958,7 +968,7 @@ def main():
             "for better API treatment."
         )
 
-    ror_url = render_institution_selector(user_agent)
+    institution_id = render_institution_selector(user_agent)
     publication_type = render_publication_type_selector()
     model = render_model_selector()
     semantic_scholar_key = resolve_semantic_scholar_key()
@@ -970,12 +980,12 @@ def main():
         default_from_date,
     )
 
-    if not ror_url:
-        st.info("Provide a ROR URL or pick an institution to continue.")
+    if not institution_id:
+        st.info("Pick an institution or paste a ROR/OpenAlex institution ID/URL to continue.")
         return
 
-    if not is_ror_url(ror_url):
-        st.error("The ROR value must look like https://ror.org/XXXXXXXXX.")
+    if not (is_ror_url(institution_id) or is_openalex_institution_id(institution_id)):
+        st.error("Institution must be a valid ROR URL or OpenAlex institution URL (e.g., https://openalex.org/I123456789).")
         return
     
     st.write("")
@@ -991,7 +1001,7 @@ def main():
             )
 
     current_params = {
-        "ror": ror_url,
+        "institution": institution_id,
         "type": publication_type,
         "model": model,
         "from": from_date_str,
@@ -1052,7 +1062,7 @@ def main():
             progress_text.text(status)
 
         filename = build_output_filename(
-            ror_url,
+            institution_id,
             publication_type,
             model,
             from_date_str,
@@ -1066,7 +1076,7 @@ def main():
         with st.spinner("Contacting OpenAlex and Aurora APIs…"):
             try:
                 rows, stats = fetch_works_with_sdg(
-                    ror_url=ror_url,
+                    institution_id=institution_id,
                     from_date=from_date_str,
                     work_type=publication_type,
                     model=model,
