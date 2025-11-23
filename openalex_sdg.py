@@ -85,6 +85,12 @@ def is_openalex_institution_id(value: str) -> bool:
         re.match(r"^(https?://openalex\.org/)?I[A-Z0-9]+$", value.strip(), flags=re.I)
     )
 
+def _normalize_institution_id(value: str) -> str:
+    """Return the short OpenAlex institution ID token if present."""
+    if is_openalex_institution_id(value):
+        return value.strip().split("/")[-1]
+    return value.strip()
+
 def search_institutions_by_name(
     name: str, user_agent: str = DEFAULT_USER_AGENT, limit: int = 10
 ) -> List[dict]:
@@ -94,6 +100,34 @@ def search_institutions_by_name(
     response = requests.get(BASE_INSTITUTIONS, params=params, headers=headers, timeout=30)
     response.raise_for_status()
     return response.json().get("results", [])
+
+def fetch_institution_lineage(
+    institution_id: str,
+    user_agent: str = DEFAULT_USER_AGENT,
+    retries: int = 2,
+    pause: float = 0.4,
+) -> List[str]:
+    """Fetch the institution record to read its lineage IDs."""
+    inst_token = _normalize_institution_id(institution_id)
+    url = f"{BASE_INSTITUTIONS}/{inst_token}"
+    headers = {"User-Agent": user_agent}
+    for attempt in range(1, retries + 1):
+        try:
+            resp = requests.get(url, headers=headers, timeout=20)
+            if resp.status_code == 429:
+                time.sleep(pause * attempt)
+                continue
+            resp.raise_for_status()
+            data = resp.json()
+            lineage = data.get("lineage") or []
+            if isinstance(lineage, list):
+                return [str(_normalize_institution_id(item)) for item in lineage if item]
+            return []
+        except requests.RequestException:
+            if attempt == retries:
+                return []
+            time.sleep(pause * attempt)
+    return []
 
 def reconstruct_abstract(inv: Optional[dict]) -> str:
     """Rebuild abstract text from OpenAlex 'abstract_inverted_index' or '_v3'."""
@@ -299,14 +333,27 @@ def make_filter(
     institution_id: str,
     from_date: Optional[str],
     work_type: Optional[str],
-    to_date: Optional[str] = None
+    to_date: Optional[str] = None,
+    extra_institution_ids: Optional[Sequence[str]] = None,
 ) -> str:
-    inst_val = institution_id
-    if is_openalex_institution_id(inst_val):
-        inst_val = inst_val.strip().split("/")[-1]  # use short OpenAlex ID
-        inst_filter = f"institutions.id:{inst_val}"
+    inst_ids = [_normalize_institution_id(institution_id)]
+    for item in extra_institution_ids or []:
+        norm = _normalize_institution_id(str(item))
+        if norm and norm not in inst_ids:
+            inst_ids.append(norm)
+    ids: List[str] = []
+    rors: List[str] = []
+    for inst in inst_ids:
+        if is_openalex_institution_id(inst):
+            ids.append(inst.split("/")[-1])
+        else:
+            rors.append(inst)
+    if ids:
+        inst_filter = f"institutions.id:{'|'.join(ids)}"
+    elif rors:
+        inst_filter = f"institutions.ror:{'|'.join(rors)}"
     else:
-        inst_filter = f"institutions.ror:{inst_val}"
+        inst_filter = ""
     parts = [
         inst_filter,
         "is_paratext:false",
@@ -495,12 +542,13 @@ def fetch_works_with_sdg(
     semantic_scholar_api_key: Optional[str] = None,
     enable_google_scholar: bool = True,
     serpapi_api_key: Optional[str] = None, # New parameter
+    extra_institution_ids: Optional[Sequence[str]] = None,
     progress_callback: ProgressHook = None,
-        cancel_check: Optional[Callable[[], bool]] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
 ) -> Tuple[List[Dict[str, object]], FetchStats]:
     """Main pipeline: fetch works page-by-page and enrich/cache SDG info."""
     params = {
-        "filter": make_filter(institution_id, from_date, work_type, to_date),
+        "filter": make_filter(institution_id, from_date, work_type, to_date, extra_institution_ids=extra_institution_ids),
         "select": "id,display_name,title,publication_date,doi,abstract_inverted_index,type,language,open_access,authorships",
         "per-page": PER_PAGE,
         "cursor": "*",
@@ -710,6 +758,7 @@ __all__ = [
     "DEFAULT_USER_AGENT",
     "FetchCancelled",
     "FetchStats",
+    "fetch_institution_lineage",
     "SEMANTIC_SCHOLAR_API",
     "SERPAPI_GS_API",
     "fetch_works_with_sdg",
