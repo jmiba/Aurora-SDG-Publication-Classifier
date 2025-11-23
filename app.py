@@ -583,7 +583,7 @@ def render_institution_network(
             colorscale=[[0, "#b4a4e8"], [1, "#4d1fe3"]],  # light violet to dark
             showscale=True,
             colorbar=dict(title="Degree"),
-            opacity=0.9,
+            opacity=0.999,
         ),
         text=[txt.split(" (")[0] for txt in node_text],
         textposition="top center",

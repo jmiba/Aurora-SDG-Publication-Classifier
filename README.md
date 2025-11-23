@@ -12,6 +12,17 @@ This Streamlit app helps you explore publications from the OpenAlex database for
 - **Visualize SDG coverage**: A donut chart aggregates SDG scores across all rows or a single selected publication.
 - **Export data**: Download either a CSV or Excel file for the entire result set.
 
+## Screenshots
+
+![SDG classification results](image.png)
+SDG classification results with donut chart and data preview.
+
+![Co-affiliation network](image-1.png)
+Co-affiliation network visualization based on publication data.
+
+![OA status of publication volume](image-2.png)
+OA status of publication volume over time.
+
 ## Demo
 A live demo is available at [Streamlit Cloud - Aurora SDG Publicaton Classifier](https://aurora-sdg-publication-classifier.streamlit.app). Note that the demo instance may have usage limits and could be slower due to shared resources.
 
