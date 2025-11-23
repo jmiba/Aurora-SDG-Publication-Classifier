@@ -151,12 +151,16 @@ def reconstruct_abstract(inv: Optional[dict]) -> str:
             )
     return " ".join(tokens_by_pos).strip()
 
-def flatten_authors_and_institutions(authorships: Sequence[dict]) -> Tuple[str, str]:
-    """Convert OpenAlex authorship structures into 'A; B' strings."""
+def flatten_authors_and_institutions(authorships: Sequence[dict]) -> Tuple[str, str, List[dict]]:
+    """
+    Convert OpenAlex authorship structures into 'A; B' strings and collect structured affiliations.
+    Each affiliation is a dict with id, name, and country.
+    """
     if not authorships:
-        return "", ""
+        return "", "", []
     author_names: List[str] = []
     all_insts: List[str] = []
+    affiliations: List[dict] = []
     for author_entry in authorships:
         author = (author_entry.get("author") or {}).get("display_name") or ""
         if author:
@@ -165,13 +169,20 @@ def flatten_authors_and_institutions(authorships: Sequence[dict]) -> Tuple[str, 
             name = inst.get("display_name") or ""
             if name:
                 all_insts.append(name)
+            affiliations.append(
+                {
+                    "id": inst.get("id") or "",
+                    "name": name,
+                    "country": (inst.get("country_code") or "").upper(),
+                }
+            )
     seen = set()
     inst_names: List[str] = []
     for name in all_insts:
         if name not in seen:
             seen.add(name)
             inst_names.append(name)
-    return "; ".join(author_names), "; ".join(inst_names)
+    return "; ".join(author_names), "; ".join(inst_names), affiliations
 
 def clean_html_fragment(text: str) -> str:
     """Strip HTML tags/entities and normalize whitespace."""
@@ -604,7 +615,7 @@ def fetch_works_with_sdg(
             is_oa = open_access.get("is_oa")
             oa_status = open_access.get("oa_status") or ""
             authorships = work.get("authorships") or []
-            authors_str, insts_str = flatten_authors_and_institutions(authorships)
+            authors_str, insts_str, inst_affiliations = flatten_authors_and_institutions(authorships)
 
             cached_work = get_cached_work(openalex_id) if openalex_id else None
             cached_abstract = (cached_work or {}).get("abstract") or ""
@@ -711,6 +722,10 @@ def fetch_works_with_sdg(
                 "oa_status": oa_status,
                 "authors": authors_str,
                 "institutions": insts_str,
+                "institution_ids": "; ".join([aff.get("id", "") for aff in inst_affiliations if aff.get("id")]),
+                "institution_countries": "; ".join([aff.get("country", "") for aff in inst_affiliations]),
+                "institution_names_raw": "; ".join([aff.get("name", "") for aff in inst_affiliations]),
+                "institution_affiliations_json": json.dumps(inst_affiliations, ensure_ascii=False),
                 "abstract": abstract_text,
                 "sdg_model": model,
                 "sdg_response": sdg_raw_str,
