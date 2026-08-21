@@ -1,20 +1,33 @@
 import csv
 import io
-import math
-import re
 import itertools
 import json
-import networkx as nx
+import math
+import re
+import tomllib
+from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    Mapping,
+    MutableMapping,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+    cast,
+)
 
 import altair as alt
+import networkx as nx
 import pandas as pd
 import plotly.graph_objects as go
 import requests
 import streamlit as st
-import tomllib
 
 from openalex_sdg import (
     AURORA_MODELS,
@@ -23,15 +36,16 @@ from openalex_sdg import (
     FetchStats,
     fetch_institution_lineage,
     fetch_publications_with_sdg,
-    is_ror_url,
     is_openalex_institution_id,
+    is_ror_url,
     sanitize_filename,
-    search_institutions_by_name,
     scholarly_fallback_available,
+    search_institutions_by_name,
 )
 from publication_sources import DSpaceSource, end_of_month, parse_dspace_sources
 
 SECRET_HTTP_USER_AGENT = "http_user_agent"
+SECRET_AURORA_BASE_URL = "aurora_base_url"
 SECRET_SEMANTIC_SCHOLAR_KEY = "semantic_scholar_api_key"
 SECRET_GOOGLE_SCHOLAR_ENABLED = "google_scholar_enabled"
 SECRET_DEFAULT_START = "advanced_options.default_from_date"
@@ -90,6 +104,28 @@ OA_STATUS_COLORS = {
     "open": "#0c6b2f",
     "unknown": "#94a3b8",
 }
+
+
+@dataclass(frozen=True)
+class QuerySelection:
+    """Validated query and service configuration for one fetch run."""
+
+    include_openalex: bool
+    dspace_sources: Tuple[DSpaceSource, ...]
+    institution_id: Optional[str]
+    institution_ids: Tuple[str, ...]
+    include_lineage: bool
+    cached_lineage: Tuple[str, ...]
+    publication_types: Tuple[str, ...]
+    model: str
+    from_date: str
+    to_date: str
+    limit_rows: Optional[int]
+    user_agent: str
+    semantic_scholar_api_key: Optional[str]
+    google_scholar_enabled: bool
+    serpapi_api_key: Optional[str]
+    aurora_base_url: Optional[str]
 SDG_COLORS = {
     "1": "#e5243b",   # No Poverty
     "2": "#dda63a",   # Zero Hunger
@@ -200,6 +236,23 @@ def resolve_user_agent() -> Tuple[str, bool]:
     if secret_value:
         return secret_value.strip(), True
     return DEFAULT_USER_AGENT, False
+
+
+def has_contact_user_agent(value: str) -> bool:
+    """Return whether a User-Agent contains a non-placeholder contact email."""
+    match = re.search(r"mailto:([^\s)]+@[^\s)]+)", value or "", flags=re.I)
+    if not match:
+        return False
+    domain = match.group(1).rsplit("@", 1)[-1].lower()
+    return domain not in {"example.com", "example.org", "example.net"} and not domain.endswith(
+        ".invalid"
+    )
+
+
+def resolve_aurora_base_url() -> Optional[str]:
+    """Read the configured Aurora classifier base URL."""
+    value = get_secret_text(SECRET_AURORA_BASE_URL)
+    return value.rstrip("/") if value else None
 
 
 def resolve_semantic_scholar_key() -> Optional[str]:
@@ -495,10 +548,10 @@ def render_institution_network(
     # Collapse IDs that share the same label to avoid duplicate-looking nodes.
     id_to_label: Dict[str, str] = {}
     for inst_id in set(inst_labels.keys()) | set(inst_countries.keys()):
-        country = inst_countries.get(inst_id)
+        country_code = inst_countries.get(inst_id)
         base_label = inst_labels.get(inst_id) or inst_id.split('/')[-1] or inst_id
-        if country:
-            base_label = f"{base_label} ({country})"
+        if country_code:
+            base_label = f"{base_label} ({country_code})"
         id_to_label[inst_id] = base_label
 
     label_edge_counts: Dict[Tuple[str, str], int] = {}
@@ -507,7 +560,7 @@ def render_institution_network(
         lb = id_to_label.get(b, b)
         if la == lb:
             continue
-        key = tuple(sorted((la, lb)))
+        key = (la, lb) if la < lb else (lb, la)
         label_edge_counts[key] = label_edge_counts.get(key, 0) + w
 
     if not label_edge_counts:
@@ -545,7 +598,7 @@ def render_institution_network(
         degree[b] = degree.get(b, 0) + w
 
     # Limit to top nodes by degree, but ensure the selected node stays if present.
-    top_nodes = set(sorted(degree, key=degree.get, reverse=True)[:max_nodes])
+    top_nodes = set(sorted(degree, key=lambda node: degree[node], reverse=True)[:max_nodes])
     if selected_label and selected_label in degree:
         top_nodes.add(selected_label)
     filtered_edges = {(a, b): w for (a, b), w in label_edge_counts.items() if a in top_nodes and b in top_nodes}
@@ -554,7 +607,6 @@ def render_institution_network(
         return
 
     # Layout: keep selected at center (if present), scatter others randomly.
-    import random
 
     node_positions: Dict[str, Tuple[float, float, float]] = {}
     if selected_label and selected_label in top_nodes:
@@ -567,8 +619,6 @@ def render_institution_network(
                 primary_neighbors.add(b)
             elif b == selected_label:
                 primary_neighbors.add(a)
-    secondary_nodes = set(top_nodes) - primary_neighbors - ({selected_label} if selected_label else set())
-
     # Use a spring layout to keep connected nodes closer together.
     G = nx.Graph()
     for node in top_nodes:
@@ -1036,7 +1086,11 @@ def render_institution_selector(user_agent: str) -> Tuple[Optional[str], bool]:
         search_query = st.text_input(
             "Search by institution name first", placeholder="Europa-Universität Viadrina"
         )
-        submitted = st.form_submit_button("Search OpenAlex institutions", type="primary")
+        submitted = st.form_submit_button(
+            "Search OpenAlex institutions",
+            type="primary",
+            disabled=not has_contact_user_agent(user_agent),
+        )
     search_results: Optional[List[dict]] = st.session_state.get("institution_search_results")
     search_ran = st.session_state.get("institution_search_ran", False)
     if submitted:
@@ -1197,10 +1251,14 @@ def render_publication_type_selector(
 def render_model_selector() -> str:
     """Let the user pick which SDG classifier to run."""
     st.subheader("4. SDG classifier", divider="green")
-    desc_only = [desc for _, desc in AURORA_MODELS]
     default_index = next((i for i, (name, _) in enumerate(AURORA_MODELS) if name == "aurora-sdg-multi"), 0)
-    selection = st.selectbox("Choose a model", desc_only, index=default_index)
-    return AURORA_MODELS[desc_only.index(selection)][0]
+    selected_index = st.selectbox(
+        "Choose a model",
+        options=range(len(AURORA_MODELS)),
+        index=default_index,
+        format_func=lambda index: AURORA_MODELS[index][1],
+    )
+    return AURORA_MODELS[selected_index][0]
 
 
 def render_advanced_options(
@@ -1266,6 +1324,154 @@ def render_advanced_options(
     return from_date.strftime("%Y-%m-%d"), to_date.strftime("%Y-%m-%d"), (limit_value or None)
 
 
+def build_query_params(selection: QuerySelection) -> Dict[str, Any]:
+    """Build the stable, non-secret identity of a query."""
+    return {
+        "sources": [
+            *(["openalex"] if selection.include_openalex else []),
+            *[source.id for source in selection.dspace_sources],
+        ],
+        "institutions": list(selection.institution_ids),
+        "types": list(selection.publication_types),
+        "model": selection.model,
+        "from": selection.from_date,
+        "to": selection.to_date,
+        "limit": selection.limit_rows,
+    }
+
+
+def query_configuration_errors(selection: QuerySelection) -> List[str]:
+    """Return configuration errors that must block a new fetch."""
+    errors = []
+    if selection.include_openalex and not has_contact_user_agent(selection.user_agent):
+        errors.append(
+            "OpenAlex fetches require `http_user_agent` in `.streamlit/secrets.toml` "
+            "with a real contact email in `mailto:` form."
+        )
+    if selection.model != "skip" and not selection.aurora_base_url:
+        errors.append(
+            "SDG classification requires `aurora_base_url` in "
+            "`.streamlit/secrets.toml`."
+        )
+    return errors
+
+
+def request_cancel_for_changed_params(
+    state: MutableMapping[str, Any],
+    current_params: Mapping[str, Any],
+) -> bool:
+    """Request cancellation when controls no longer match the active fetch."""
+    if not state.get("fetch_in_progress"):
+        return False
+    ongoing_params = state.get("fetch_params")
+    if not isinstance(ongoing_params, Mapping):
+        return False
+    if dict(ongoing_params) == dict(current_params):
+        return False
+    request_fetch_cancel(state)
+    return True
+
+
+def request_fetch_cancel(state: MutableMapping[str, Any]) -> None:
+    """Set the cooperative cancellation flag for the active fetch."""
+    state["fetch_cancel_requested"] = True
+
+
+def invalidate_stale_result(
+    state: MutableMapping[str, Any],
+    current_params: Mapping[str, Any],
+) -> Tuple[Optional[Dict[str, Any]], bool]:
+    """Remove completed results that do not belong to the active controls."""
+    state.setdefault("fetch_cancel_requested", False)
+    state.setdefault("fetch_in_progress", False)
+    result_payload = state.get(RESULT_SESSION_KEY)
+    if (
+        isinstance(result_payload, Mapping)
+        and not state["fetch_in_progress"]
+        and not _result_payload_matches_params(result_payload, current_params)
+    ):
+        state.pop(RESULT_SESSION_KEY, None)
+        state.pop("preview_focus_index", None)
+        state["preview_page"] = 1
+        return None, True
+    return (
+        dict(result_payload) if isinstance(result_payload, Mapping) else None,
+        False,
+    )
+
+
+def begin_fetch(
+    state: MutableMapping[str, Any],
+    current_params: Mapping[str, Any],
+) -> None:
+    """Initialize session state for a new fetch."""
+    state["fetch_params"] = dict(current_params)
+    state["fetch_cancel_requested"] = False
+    state["fetch_in_progress"] = True
+
+
+def execute_publication_fetch(
+    selection: QuerySelection,
+    *,
+    progress_callback: Callable[[int, Optional[int], str], None],
+    cancel_check: Callable[[], bool],
+) -> Dict[str, Any]:
+    """Resolve lineage, fetch publications, and build a completed result payload."""
+    extra_institution_ids = list(selection.institution_ids[1:])
+    if selection.include_openalex and selection.include_lineage:
+        for index, configured_id in enumerate(selection.institution_ids):
+            lineage_ids = (
+                list(selection.cached_lineage)
+                if index == 0 and selection.cached_lineage
+                else fetch_institution_lineage(
+                    configured_id,
+                    user_agent=selection.user_agent,
+                )
+            )
+            for lineage_id in lineage_ids:
+                if (
+                    lineage_id not in selection.institution_ids
+                    and lineage_id not in extra_institution_ids
+                ):
+                    extra_institution_ids.append(lineage_id)
+
+    rows, stats = fetch_publications_with_sdg(
+        include_openalex=selection.include_openalex,
+        dspace_sources=selection.dspace_sources,
+        institution_id=selection.institution_id,
+        from_date=selection.from_date,
+        work_type=selection.publication_types,
+        model=selection.model,
+        to_date=selection.to_date,
+        limit_rows=selection.limit_rows,
+        user_agent=selection.user_agent,
+        semantic_scholar_api_key=selection.semantic_scholar_api_key,
+        enable_google_scholar=selection.google_scholar_enabled,
+        serpapi_api_key=selection.serpapi_api_key,
+        aurora_base_url=selection.aurora_base_url,
+        extra_institution_ids=extra_institution_ids or None,
+        progress_callback=progress_callback,
+        cancel_check=cancel_check,
+    )
+    filename = build_output_filename(
+        build_query_params(selection)["sources"],
+        selection.institution_id,
+        selection.publication_types,
+        selection.model,
+        selection.from_date,
+        selection.to_date,
+        selection.limit_rows,
+    )
+    return {
+        "schema_version": RESULT_SCHEMA_VERSION,
+        "csv_bytes": rows_to_csv_bytes(rows),
+        "rows": rows,
+        "stats": stats,
+        "filename": filename,
+        "params": build_query_params(selection),
+    }
+
+
 def _reset_fetch_state(
     progress_bar: Any,
     progress_text: Any,
@@ -1294,7 +1500,260 @@ def _result_payload_matches_params(
     )
 
 
-def main():
+def result_rows_from_payload(result_payload: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    """Return structured rows, falling back to the stored CSV for old payloads."""
+    rows = result_payload.get("rows")
+    if isinstance(rows, list):
+        return [dict(row) for row in rows if isinstance(row, Mapping)]
+    csv_bytes = result_payload.get("csv_bytes") or b""
+    try:
+        csv_text = bytes(csv_bytes).decode("utf-8")
+    except UnicodeDecodeError:
+        csv_text = bytes(csv_bytes).decode("utf-8", errors="ignore")
+    return list(csv.DictReader(io.StringIO(csv_text)))
+
+
+def render_fetch_summary(stats: FetchStats, google_scholar_enabled: bool) -> None:
+    """Render the completed source, deduplication, and enrichment counts."""
+    gs_note = (
+        f"; retrieved from Google Scholar: **{stats.gs_abstract_retrieved:,}**."
+        if google_scholar_enabled
+        else "."
+    )
+    st.success(
+        f"Fetched **{stats.total_source_records:,}** source records from "
+        f"**{', '.join(stats.sources_queried)}** and wrote "
+        f"**{stats.total_processed:,}** deduplicated rows "
+        f"(**{stats.duplicates_removed:,}** duplicates merged). "
+        f"Abstracts available: **{stats.total_abstracts_available:,}**; "
+        f"canonical publications missing abstracts before enrichment: "
+        f"**{stats.source_abstract_missing:,}**; retrieved from Semantic Scholar: "
+        f"**{stats.ss_abstract_retrieved:,}**{gs_note}"
+    )
+
+
+def render_result_preview(
+    all_rows: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    """Render the paginated preview and return the rows selected for focused charts."""
+    total_rows = len(all_rows)
+    selected_index = st.session_state.get("preview_focus_index")
+    chart_rows = all_rows
+    selected_title: Optional[str] = None
+    if total_rows <= 0:
+        st.session_state["preview_page"] = 1
+        st.info("No preview rows available.")
+        return chart_rows, selected_title
+
+    st.write("")
+    st.subheader("Preview", divider="orange")
+    st.markdown(RADIO_CHECKBOX_CSS, unsafe_allow_html=True)
+    total_pages = max(1, math.ceil(total_rows / PREVIEW_PAGE_SIZE))
+    st.session_state.setdefault("preview_page", 1)
+    current_page = min(max(1, st.session_state["preview_page"]), total_pages)
+    if total_pages > 1:
+        first_col, prev_col, info_col, next_col, last_col = st.columns(
+            [1, 1, 2, 1, 1]
+        )
+
+        def set_page(target: int) -> None:
+            st.session_state["preview_page"] = max(1, min(total_pages, target))
+            st.rerun()
+
+        if first_col.button("⏮ First", disabled=current_page == 1):
+            set_page(1)
+        if prev_col.button("◀ Previous", disabled=current_page == 1):
+            set_page(current_page - 1)
+        if next_col.button("Next ▶", disabled=current_page == total_pages):
+            set_page(current_page + 1)
+        if last_col.button("Last ⏭", disabled=current_page == total_pages):
+            set_page(total_pages)
+        current_page = st.session_state["preview_page"]
+        info_col.markdown(f"Page **{current_page} / {total_pages}**")
+    else:
+        current_page = 1
+
+    start_index = (current_page - 1) * PREVIEW_PAGE_SIZE
+    preview_rows = build_preview_rows(
+        all_rows,
+        PREVIEW_COLUMNS,
+        limit=PREVIEW_PAGE_SIZE,
+        offset=start_index,
+    )
+    preview_df = pd.DataFrame(preview_rows)
+    if "authors" in preview_df.columns:
+        preview_df["authors"] = preview_df["authors"].apply(abbreviate_authors)
+    preview_df.insert(
+        0,
+        "#",
+        range(start_index + 1, start_index + 1 + len(preview_df)),
+    )
+    rows_in_page = len(preview_df)
+    table_height = (
+        980
+        if rows_in_page >= PREVIEW_PAGE_SIZE
+        else max(200, rows_in_page * 35 + 120)
+    )
+    column_configs = {}
+    for column in preview_df.columns:
+        if column == "#":
+            column_configs[column] = st.column_config.NumberColumn(
+                "#", help="Row number in this page", width="small"
+            )
+        elif column == "record_url":
+            column_configs[column] = st.column_config.LinkColumn(
+                "Source record",
+                help="Open the publication in its source repository",
+                display_text=r"https?://(?:www\.)?([^/]+)/.*",
+            )
+        elif column.lower() == "doi":
+            column_configs[column] = st.column_config.LinkColumn(
+                "DOI",
+                help="Open this DOI in a new tab",
+                display_text=r"(?:https?://(?:dx\.)?doi\.org/)?(.+)",
+            )
+        else:
+            column_configs[column] = st.column_config.TextColumn(
+                column.replace("_", " ").title()
+            )
+    st.data_editor(
+        preview_df,
+        hide_index=True,
+        disabled=True,
+        height=table_height,
+        width="stretch",
+        column_config=column_configs,
+    )
+    st.caption(f"Showing page {current_page} of {total_pages}.")
+
+    dropdown_options = ["0 — All publications"]
+    for index, row in enumerate(all_rows):
+        title_preview = (
+            row.get("title") or row.get("display_name") or "(no title)"
+        )[:80]
+        authors_preview = abbreviate_authors(row.get("authors") or "")
+        label = f"{index + 1} — {title_preview}"
+        if authors_preview:
+            label = f"{index + 1} — {authors_preview}, {title_preview}"
+        dropdown_options.append(label)
+
+    dropdown_default = (
+        0 if selected_index is None else min(max(0, selected_index + 1), total_rows)
+    )
+    previous_focus = st.session_state.get("preview_focus_index")
+    selected_option = st.selectbox(
+        "Focus publication",
+        options=list(range(len(dropdown_options))),
+        format_func=lambda index: dropdown_options[index],
+        index=dropdown_default,
+    )
+    selected_index = selected_option - 1 if selected_option > 0 else None
+    if selected_index != previous_focus:
+        st.session_state["preview_focus_index"] = selected_index
+        st.rerun()
+
+    if selected_index is not None and 0 <= selected_index < total_rows:
+        chart_rows = [all_rows[selected_index]]
+        row_info = all_rows[selected_index]
+        author_info = abbreviate_authors(row_info.get("authors") or "")
+        title_info = (
+            row_info.get("title") or row_info.get("display_name") or "(no title)"
+        )
+        selected_title = (
+            f"{author_info}, {title_info}" if author_info else str(title_info)
+        )
+    st.caption("Select a publication above (0 = All).")
+    return chart_rows, selected_title
+
+
+def render_result_charts(
+    all_rows: List[Dict[str, Any]],
+    chart_rows: List[Dict[str, Any]],
+    selected_title: Optional[str],
+    *,
+    from_date: str,
+    to_date: str,
+    institution_id: Optional[str],
+) -> None:
+    """Render every result visualization in its stable page order."""
+    chart_data = aggregate_sdg_counts(chart_rows)
+    st.write("")
+    st.subheader("SDG distribution", divider="red")
+    chart_title = "selected publication" if len(chart_rows) == 1 else "all publications"
+    if chart_title == "selected publication" and selected_title:
+        chart_title = f"selected publication ({selected_title})"
+    render_sdg_pie_chart(chart_data, f"SDGs in {chart_title}")
+    st.write("")
+    st.subheader("Co-affiliation network", divider="violet")
+    render_institution_network(chart_rows, from_date, to_date, institution_id)
+    st.write("")
+    st.subheader("OA distribution by author", divider="blue")
+    render_author_oa_chart(all_rows, from_date, to_date)
+    st.write("")
+    st.subheader("Open Access - closed access ratio", divider="green")
+    render_oa_ring_chart(chart_rows)
+    st.write("")
+    st.subheader("Publication volume by OA status", divider="yellow")
+    render_oa_status_chart(all_rows, from_date, to_date)
+    st.write("")
+    st.subheader("Publication types in selected period", divider="orange")
+    render_publication_type_chart(all_rows, from_date, to_date)
+
+
+def render_export_downloads(
+    export_rows: List[Dict[str, Any]],
+    csv_bytes: bytes,
+    filename: str,
+) -> None:
+    """Render XLSX and CSV downloads for one completed result."""
+    st.write("")
+    st.divider()
+    st.header("Download data set", divider="rainbow")
+    st.info(
+        "Download the full data set as Excel or CSV for further analysis using "
+        "[OpenRefine](https://openrefine.org) or other tools.",
+        icon=":material/file_download:",
+    )
+    if export_rows:
+        st.download_button(
+            "Download Excel",
+            data=rows_to_excel_bytes(export_rows, CSV_FIELDNAMES),
+            file_name=filename.replace(".csv", ".xlsx"),
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+    st.download_button(
+        "Download CSV",
+        data=csv_bytes,
+        file_name=filename,
+        mime="text/csv",
+    )
+
+
+def render_completed_result(
+    result_payload: Mapping[str, Any],
+    selection: QuerySelection,
+) -> None:
+    """Render summary, preview, charts, and downloads for a completed query."""
+    stats = result_payload["stats"]
+    if not isinstance(stats, FetchStats):
+        raise TypeError("Completed result is missing FetchStats")
+    csv_bytes = bytes(result_payload["csv_bytes"])
+    filename = str(result_payload["filename"])
+    all_rows = result_rows_from_payload(result_payload)
+    render_fetch_summary(stats, selection.google_scholar_enabled)
+    chart_rows, selected_title = render_result_preview(all_rows)
+    render_result_charts(
+        all_rows,
+        chart_rows,
+        selected_title,
+        from_date=selection.from_date,
+        to_date=selection.to_date,
+        institution_id=selection.institution_id,
+    )
+    render_export_downloads(all_rows, csv_bytes, filename)
+
+
+def main() -> None:
     """Streamlit entry point that wires all widgets, fetch flow, and previews."""
     st.set_page_config(page_title="Aurora SDG Publication Classifier", layout="wide")
     st.title("Aurora SDG Publication Classifier")
@@ -1302,16 +1761,16 @@ def main():
         "Fetch and deduplicate publications from OpenAlex and configured DSpace repositories, relate them to the 17 UN Sustainable Development Goals (SDGs) using the [Aurora SDG classifier](https://aurora-universities.eu/sdg-research/classify/), and export the results."
     )
 
-    user_agent, has_user_agent_secret = resolve_user_agent()
-    if not has_user_agent_secret:
+    user_agent, _ = resolve_user_agent()
+    if not has_contact_user_agent(user_agent):
         st.text_input(
             "HTTP User-Agent (set via secrets.toml)",
             value=user_agent,
             disabled=True,
         )
         st.warning(
-            "Set `http_user_agent` in .streamlit/secrets.toml with your contact email "
-            "for better API treatment."
+            "OpenAlex fetches stay disabled until `http_user_agent` in "
+            "`.streamlit/secrets.toml` contains a real contact email."
         )
 
     configured_dspace_sources = resolve_dspace_sources()
@@ -1328,6 +1787,8 @@ def main():
     include_openalex, selected_dspace_sources = render_source_selector(configured_dspace_sources)
     openalex_institution_ids: List[str] = []
     using_configured_institutions = False
+    institution_id: Optional[str] = None
+    include_lineage = False
     if include_openalex:
         configured_ids = [
             source.openalex_query_id
@@ -1345,7 +1806,6 @@ def main():
             if institution_id:
                 openalex_institution_ids = [institution_id]
     else:
-        institution_id, include_lineage = None, False
         st.caption("OpenAlex is not selected, so no OpenAlex institution is required.")
     st.write("")
     publication_types = render_publication_type_selector(
@@ -1357,7 +1817,7 @@ def main():
     st.write("")
     semantic_scholar_key = resolve_semantic_scholar_key()
     google_scholar_enabled = resolve_google_scholar_enabled()
-    serpapi_api_key = resolve_serpapi_key() # Retrieve SerpApi key
+    serpapi_api_key = resolve_serpapi_key()
     default_from_date = get_secret_text(SECRET_DEFAULT_START)
     from_date_str, to_date_str, limit_rows = render_advanced_options(
         semantic_scholar_key,
@@ -1388,56 +1848,64 @@ def main():
     st.header("Run query and preview results", divider="rainbow")
     render_google_scholar_status(google_scholar_enabled, serpapi_api_key)
 
-    current_params = {
-        "sources": [
-            *(["openalex"] if include_openalex else []),
-            *[source.id for source in selected_dspace_sources],
-        ],
-        "institutions": openalex_institution_ids,
-        "types": publication_types,
-        "model": model,
-        "from": from_date_str,
-        "to": to_date_str,
-        "limit": limit_rows,
-    }
+    cached_meta = (
+        {}
+        if using_configured_institutions
+        else st.session_state.get("selected_institution_meta") or {}
+    )
+    selection = QuerySelection(
+        include_openalex=include_openalex,
+        dspace_sources=tuple(selected_dspace_sources),
+        institution_id=institution_id,
+        institution_ids=tuple(openalex_institution_ids),
+        include_lineage=include_lineage,
+        cached_lineage=tuple(
+            str(value) for value in cached_meta.get("lineage") or [] if value
+        ),
+        publication_types=tuple(publication_types),
+        model=model,
+        from_date=from_date_str,
+        to_date=to_date_str,
+        limit_rows=limit_rows,
+        user_agent=user_agent,
+        semantic_scholar_api_key=semantic_scholar_key,
+        google_scholar_enabled=google_scholar_enabled,
+        serpapi_api_key=serpapi_api_key,
+        aurora_base_url=resolve_aurora_base_url(),
+    )
+    current_params = build_query_params(selection)
+    fetch_state = cast(MutableMapping[str, Any], st.session_state)
+    if request_cancel_for_changed_params(fetch_state, current_params):
+        st.toast(
+            "Parameters changed, cancelling active fetch...",
+            icon=":material/stop_circle:",
+        )
+    result_payload, result_invalidated = invalidate_stale_result(
+        fetch_state,
+        current_params,
+    )
 
-    # If a fetch is running, check if parameters have changed.
-    # If they have, request a cancellation.
-    if st.session_state.get("fetch_in_progress"):
-        ongoing_fetch_params = st.session_state.get("fetch_params")
-        if ongoing_fetch_params and ongoing_fetch_params != current_params:
-            st.session_state["fetch_cancel_requested"] = True
-            st.toast("Parameters changed, cancelling active fetch...", icon="🛑")
+    configuration_errors = query_configuration_errors(selection)
+    for message in configuration_errors:
+        st.error(message)
 
-    result_payload = st.session_state.get(RESULT_SESSION_KEY)
-    st.session_state.setdefault("fetch_cancel_requested", False)
-    st.session_state.setdefault("fetch_in_progress", False)
-    result_invalidated = False
-    if (
-        result_payload
-        and not st.session_state["fetch_in_progress"]
-        and not _result_payload_matches_params(result_payload, current_params)
-    ):
-        st.session_state.pop(RESULT_SESSION_KEY, None)
-        st.session_state.pop("preview_focus_index", None)
-        st.session_state["preview_page"] = 1
-        result_payload = None
-        result_invalidated = True
+    cancel_button_placeholder = st.empty()
 
-    cancel_button_placeholder = st.empty() # New placeholder for the cancel button
-
-    run_button_clicked = st.button("Fetch works and build CSV", type="primary", key="main_fetch_button")
-    if run_button_clicked: # Renamed run_button to run_button_clicked
-        st.session_state["fetch_params"] = current_params
-        st.session_state["fetch_cancel_requested"] = False
-        st.session_state["fetch_in_progress"] = True
-        st.rerun() # Trigger a rerun to enter the 'fetch_in_progress' block below
+    run_button_clicked = st.button(
+        "Fetch works and build CSV",
+        type="primary",
+        key="main_fetch_button",
+        disabled=bool(configuration_errors),
+    )
+    if run_button_clicked:
+        begin_fetch(fetch_state, current_params)
+        st.rerun()
 
     # This block handles rendering the cancel button and the actual fetch logic
     if st.session_state.get("fetch_in_progress"):
         # Render the cancel button inside its dedicated placeholder
         if cancel_button_placeholder.button("Cancel fetch", type="secondary", key="cancel_fetch_button"):
-            st.session_state["fetch_cancel_requested"] = True
+            request_fetch_cancel(fetch_state)
             st.toast("Cancelling fetch…", icon=":material/stop_circle:")
 
         progress_bar = st.progress(0)
@@ -1445,7 +1913,7 @@ def main():
         progress_detail = st.empty()
         current_detail: str = ""
 
-        def progress_callback(done: int, expected: Optional[int], message: str):
+        def progress_callback(done: int, expected: Optional[int], message: str) -> None:
             nonlocal current_detail
             target = limit_rows or expected
             fraction = min(done / target, 1.0) if target else 0.0
@@ -1464,88 +1932,63 @@ def main():
                 progress_detail.empty()
             progress_text.text(status)
 
-        extra_institution_ids: List[str] = list(openalex_institution_ids[1:])
-        if include_openalex and include_lineage:
-            cached_meta = (
-                {}
-                if using_configured_institutions
-                else st.session_state.get("selected_institution_meta") or {}
-            )
-            cached_lineage = [str(val) for val in cached_meta.get("lineage") or [] if val]
-            for index, configured_id in enumerate(openalex_institution_ids):
-                lineage_ids = cached_lineage if index == 0 and cached_lineage else []
-                if not lineage_ids:
-                    lineage_ids = fetch_institution_lineage(
-                        configured_id,
-                        user_agent=user_agent,
-                    )
-                for lineage_id in lineage_ids:
-                    if lineage_id not in openalex_institution_ids and lineage_id not in extra_institution_ids:
-                        extra_institution_ids.append(lineage_id)
-
-        filename = build_output_filename(
-            current_params["sources"],
-            institution_id,
-            publication_types,
-            model,
-            from_date_str,
-            to_date_str,
-            limit_rows,
-        )
-
         def cancel_check() -> bool:
             return bool(st.session_state.get("fetch_cancel_requested"))
 
         with st.spinner("Fetching selected sources and contacting Aurora as needed…"):
             try:
-                rows, stats = fetch_publications_with_sdg(
-                    include_openalex=include_openalex,
-                    dspace_sources=selected_dspace_sources,
-                    institution_id=institution_id,
-                    from_date=from_date_str,
-                    work_type=publication_types,
-                    model=model,
-                    to_date=to_date_str,
-                    limit_rows=limit_rows,
-                    user_agent=user_agent.strip() or DEFAULT_USER_AGENT,
-                    semantic_scholar_api_key=semantic_scholar_key,
-                    enable_google_scholar=google_scholar_enabled,
-                    serpapi_api_key=serpapi_api_key, # Pass SerpApi key
-                    extra_institution_ids=extra_institution_ids or None,
+                result_payload = execute_publication_fetch(
+                    selection,
                     progress_callback=progress_callback,
                     cancel_check=cancel_check,
                 )
             except FetchCancelled:
-                _reset_fetch_state(progress_bar, progress_text, progress_detail, cancel_button_placeholder) # Use new placeholder
-                st.info("Fetch cancelled.", icon="⏹️")
+                _reset_fetch_state(
+                    progress_bar,
+                    progress_text,
+                    progress_detail,
+                    cancel_button_placeholder,
+                )
+                st.info("Fetch cancelled.", icon=":material/stop_circle:")
                 return
             except requests.HTTPError as exc:
-                _reset_fetch_state(progress_bar, progress_text, progress_detail, cancel_button_placeholder) # Use new placeholder
+                _reset_fetch_state(
+                    progress_bar,
+                    progress_text,
+                    progress_detail,
+                    cancel_button_placeholder,
+                )
                 st.error(f"Request failed: {exc}")
                 return
             except requests.RequestException as exc:
-                _reset_fetch_state(progress_bar, progress_text, progress_detail, cancel_button_placeholder) # Use new placeholder
+                _reset_fetch_state(
+                    progress_bar,
+                    progress_text,
+                    progress_detail,
+                    cancel_button_placeholder,
+                )
                 st.error(f"Network error: {exc}")
                 return
             except ValueError as exc:
-                _reset_fetch_state(progress_bar, progress_text, progress_detail, cancel_button_placeholder)
+                _reset_fetch_state(
+                    progress_bar,
+                    progress_text,
+                    progress_detail,
+                    cancel_button_placeholder,
+                )
                 st.error(f"Source configuration or response error: {exc}")
                 return
 
-        _reset_fetch_state(progress_bar, progress_text, progress_detail, cancel_button_placeholder) # Use new placeholder
-        csv_bytes = rows_to_csv_bytes(rows)
-        result_payload = {
-            "schema_version": RESULT_SCHEMA_VERSION,
-            "csv_bytes": csv_bytes,
-            "rows": rows,
-            "stats": stats,
-            "filename": filename,
-            "params": current_params,
-        }
+        _reset_fetch_state(
+            progress_bar,
+            progress_text,
+            progress_detail,
+            cancel_button_placeholder,
+        )
         st.session_state[RESULT_SESSION_KEY] = result_payload
         st.session_state.pop("preview_focus_index", None)
         st.session_state["preview_page"] = 1
-        st.rerun() # Rerun to display results after fetch completes.
+        st.rerun()
 
     elif not result_payload:
         if result_invalidated:
@@ -1554,191 +1997,7 @@ def main():
             st.info("Click the button above to fetch publications.")
         return
 
-    csv_bytes: bytes = result_payload["csv_bytes"]
-    stats: FetchStats = result_payload["stats"]
-    filename: str = result_payload["filename"]
-    rows: Optional[List[Dict[str, Any]]] = result_payload.get("rows")
-
-    gs_note = (
-        f"; retrieved from Google Scholar: **{stats.gs_abstract_retrieved:,}**."
-        if google_scholar_enabled
-        else "."
-    )
-    st.success(
-        f"Fetched **{stats.total_source_records:,}** source records from "
-        f"**{', '.join(stats.sources_queried)}** and wrote "
-        f"**{stats.total_processed:,}** deduplicated rows "
-        f"(**{stats.duplicates_removed:,}** duplicates merged). "
-        f"Abstracts available: **{stats.total_abstracts_available:,}**; "
-        f"canonical publications missing abstracts before enrichment: **{stats.source_abstract_missing:,}**; "
-        f"retrieved from Semantic Scholar: **{stats.ss_abstract_retrieved:,}**"
-        f"{gs_note}"
-    )
-    if rows is None:
-        try:
-            csv_text = csv_bytes.decode("utf-8")
-        except UnicodeDecodeError:
-            csv_text = csv_bytes.decode("utf-8", errors="ignore")
-        all_rows = list(csv.DictReader(io.StringIO(csv_text)))
-    else:
-        all_rows = rows
-    total_rows = len(all_rows)
-    selected_index = st.session_state.get("preview_focus_index")
-    chart_rows: List[Dict[str, Any]] = all_rows
-    selected_title: Optional[str] = None
-    if total_rows > 0:
-        st.write("")  # spacing
-        st.subheader("Preview", divider="orange")
-        st.markdown(RADIO_CHECKBOX_CSS, unsafe_allow_html=True)
-        total_pages = max(1, math.ceil(total_rows / PREVIEW_PAGE_SIZE))
-        st.session_state.setdefault("preview_page", 1)
-        current_page = min(max(1, st.session_state["preview_page"]), total_pages)
-        if total_pages > 1:
-            first_col, prev_col, info_col, next_col, last_col = st.columns([1, 1, 2, 1, 1])
-
-            def set_page(target: int):
-                st.session_state["preview_page"] = max(1, min(total_pages, target))
-                st.rerun()
-
-            if first_col.button("⏮ First", disabled=current_page == 1):
-                set_page(1)
-            if prev_col.button("◀ Previous", disabled=current_page == 1):
-                set_page(current_page - 1)
-            if next_col.button("Next ▶", disabled=current_page == total_pages):
-                set_page(current_page + 1)
-            if last_col.button("Last ⏭", disabled=current_page == total_pages):
-                set_page(total_pages)
-            current_page = st.session_state["preview_page"]
-            info_col.markdown(f"Page **{current_page} / {total_pages}**")
-        else:
-            current_page = 1
-        start_index = (current_page - 1) * PREVIEW_PAGE_SIZE
-        preview_rows = build_preview_rows(
-            all_rows,
-            PREVIEW_COLUMNS,
-            limit=PREVIEW_PAGE_SIZE,
-            offset=start_index,
-        )
-        visible_indices = list(range(start_index, start_index + len(preview_rows)))
-        preview_df = pd.DataFrame(preview_rows)
-        if "authors" in preview_df.columns:
-            preview_df["authors"] = preview_df["authors"].apply(abbreviate_authors)
-        preview_df.insert(0, "#", range(start_index + 1, start_index + 1 + len(preview_df)))
-        rows_in_page = len(preview_df)
-        table_height = 980 if rows_in_page >= PREVIEW_PAGE_SIZE else max(200, rows_in_page * 35 + 120)
-        column_configs = {}
-        for column in preview_df.columns:
-            if column == "#":
-                column_configs[column] = st.column_config.NumberColumn(
-                    "#", help="Row number in this page", width="small"
-                )
-            elif column == "record_url":
-                column_configs[column] = st.column_config.LinkColumn(
-                    "Source record",
-                    help="Open the publication in its source repository",
-                    display_text=r"https?://(?:www\.)?([^/]+)/.*",
-                )
-            elif column.lower() == "doi":
-                column_configs[column] = st.column_config.LinkColumn(
-                    "DOI",
-                    help="Open this DOI in a new tab",
-                    display_text=r"(?:https?://(?:dx\.)?doi\.org/)?(.+)",
-                )
-            else:
-                column_configs[column] = st.column_config.TextColumn(column.replace("_", " ").title())
-        st.data_editor(
-            preview_df,
-            hide_index=True,
-            disabled=True,
-            height=table_height,
-            width="stretch",
-            column_config=column_configs,
-        )
-        st.caption(f"Showing page {current_page} of {total_pages}.")
-        dropdown_options = ["0 — All publications"]
-        for idx, row in enumerate(all_rows):
-            title_preview = (row.get("title") or row.get("display_name") or "(no title)")[:80]
-            authors_preview = abbreviate_authors(row.get("authors") or "")
-            if authors_preview:
-                dropdown_options.append(f"{idx + 1} — {authors_preview}, {title_preview}")
-            else:
-                dropdown_options.append(f"{idx + 1} — {title_preview}")
-        dropdown_default = (
-            0 if selected_index is None else min(max(0, selected_index + 1), total_rows)
-        )
-        prev_focus = st.session_state.get("preview_focus_index")
-        selected_option = st.selectbox(
-            "Focus publication",
-            options=list(range(len(dropdown_options))),
-            format_func=lambda idx: dropdown_options[idx],
-            index=dropdown_default,
-        )
-        selected_index = selected_option - 1 if selected_option > 0 else None
-        if selected_index != prev_focus:
-            st.session_state["preview_focus_index"] = selected_index
-            st.rerun()
-
-        if selected_index is not None and 0 <= selected_index < len(all_rows):
-            chart_rows = [all_rows[selected_index]]
-            row_info = all_rows[selected_index]
-            author_info = abbreviate_authors(row_info.get("authors") or "")
-            title_info = row_info.get("title") or row_info.get("display_name") or "(no title)"
-            if author_info:
-                selected_title = f"{author_info}, {title_info}"
-            else:
-                selected_title = title_info
-        else:
-            chart_rows = all_rows
-            selected_index = None
-            selected_title = None
-        st.caption("Select a publication above (0 = All).")
-    else:
-        st.session_state["preview_page"] = 1
-        st.info("No preview rows available.")
-
-    chart_data = aggregate_sdg_counts(chart_rows)
-    st.write("")
-    st.subheader("SDG distribution", divider="red")
-    chart_title = "selected publication" if len(chart_rows) == 1 else "all publications"
-    if chart_title == "selected publication" and selected_title:
-        chart_title = f"selected publication ({selected_title})"
-    render_sdg_pie_chart(chart_data, f"SDGs in {chart_title}")
-    st.write("")
-    st.subheader("Co-affiliation network", divider="violet")
-    render_institution_network(chart_rows, from_date_str, to_date_str, institution_id)
-    st.write("")
-    st.subheader("OA distribution by author", divider="blue")
-    render_author_oa_chart(all_rows, from_date_str, to_date_str)
-    st.write("")
-    st.subheader("Open Access - cosed access ratio", divider="green")
-    render_oa_ring_chart(chart_rows)
-    st.write("")
-    st.subheader("Publication volume by OA status", divider="yellow")
-    render_oa_status_chart(all_rows, from_date_str, to_date_str)
-    st.write("")
-    st.subheader("Publication types in selected period", divider="orange")
-    render_publication_type_chart(all_rows, from_date_str, to_date_str)
-    
-    st.write("")
-    st.divider()
-    st.header("Download data set", divider="rainbow")
-    st.info("Donwload the full data set as Excel or CSV for further analysis using [OpenRefine](https://openrefine.org) or other tools.", icon=":material/file_download:")
-    export_rows = rows or all_rows
-    excel_bytes = rows_to_excel_bytes(export_rows, CSV_FIELDNAMES) if export_rows else None
-    if excel_bytes:
-        st.download_button(
-            "Download Excel",
-            data=excel_bytes,
-            file_name=filename.replace(".csv", ".xlsx"),
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
-
-    st.download_button(
-        "Download CSV",
-        data=csv_bytes,
-        file_name=filename,
-        mime="text/csv",
-    )
+    render_completed_result(result_payload, selection)
 
 
 if __name__ == "__main__":

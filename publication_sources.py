@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import hashlib
 import calendar
+import hashlib
 import json
 import re
 import time
@@ -17,7 +17,6 @@ from urllib.parse import urlparse
 import requests
 
 from request_utils import request_with_backoff
-
 
 OPENALEX_WORKS_URL = "https://api.openalex.org/works"
 OPENALEX_PER_PAGE = 200

@@ -11,7 +11,6 @@ from typing import Any, Dict, Mapping, Optional
 
 from publication_sources import publication_deduplication_key, reconcile_oa_pair
 
-
 DB_PATH = Path("cache.sqlite3")
 _LOCK = threading.Lock()
 _CONN: Optional[sqlite3.Connection] = None
@@ -29,7 +28,7 @@ def _get_conn() -> sqlite3.Connection:
         _CONN = sqlite3.connect(DB_PATH, check_same_thread=False)
         _CONN.row_factory = sqlite3.Row
         _CONN.execute("PRAGMA journal_mode=WAL;")
-        _CONN.execute("PRAGMA synchronous=FULL;")
+        _CONN.execute("PRAGMA synchronous=NORMAL;")
         _CONN.execute("PRAGMA foreign_keys=ON;")
         _init_schema(_CONN)
     return _CONN
@@ -190,7 +189,7 @@ def _repair_oa_consistency(conn: sqlite3.Connection) -> None:
         """
     )
     conn.execute(
-        f"""
+        """
         UPDATE canonical_works
         SET oa_status = 'closed'
         WHERE is_oa = 0
@@ -298,8 +297,10 @@ def _migrate_legacy_rows(conn: sqlite3.Connection) -> None:
 
     for legacy_sdg in conn.execute("SELECT * FROM sdg_results").fetchall():
         row = dict(legacy_sdg)
-        publication_key = openalex_to_publication.get(str(row.get("openalex_id") or ""))
-        if not publication_key:
+        legacy_publication_key = openalex_to_publication.get(
+            str(row.get("openalex_id") or "")
+        )
+        if not legacy_publication_key:
             continue
         conn.execute(
             """
@@ -309,7 +310,7 @@ def _migrate_legacy_rows(conn: sqlite3.Connection) -> None:
             ) VALUES (?, ?, '', ?, ?, ?, ?)
             """,
             (
-                publication_key,
+                legacy_publication_key,
                 row.get("model"),
                 row.get("sdg_response"),
                 row.get("sdg_formatted"),

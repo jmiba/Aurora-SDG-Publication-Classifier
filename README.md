@@ -65,7 +65,7 @@ flowchart TB
 1. **Source fetch**: OpenAlex uses either the manually selected institution or the institution IDs linked to the selected DSpace repositories, plus the lineage, date and selected publication types. Each selected DSpace API is queried independently with its configured Discovery profile, scope and applicable entity types. DSpace `Book` is queried only once when monographs, book chapters, or both are selected; `dc.type` metadata separates the returned records locally. When a record limit is set, each DSpace entity category contributes candidates before the global newest-first limit is applied. DSpace pages use metadata-only search results; media endpoints are never followed.
 2. **Normalization and deduplication**: Source-qualified record IDs remain preserved while exact DOI or exact title/year/first-author matches become one canonical publication. Fuzzy similarity is not used for automatic merging.
 3. **Caching**: `source_records` preserves raw source responses, `canonical_works` stores merged publications, and `sdg_results_v2` stores classifications with the hash of the classified text. Cache updates preserve accumulated provenance and richer abstracts when a later query uses fewer sources. The legacy `works` and `sdg_results` tables remain intact and are copied additively on first use.
-4. **Enrichment and SDG classification**: After deduplication, independent publications are processed concurrently in a bounded eight-worker pool, with a separate reusable HTTP session per worker. Cache access remains synchronized, and Aurora request starts are globally spaced by at least 0.12 seconds. Depending on the model, the selected abstract or title is sent to Aurora once per canonical publication; an unchanged text hash reuses the previous result.
+4. **Enrichment and SDG classification**: After deduplication, independent publications are processed concurrently in a bounded eight-worker pool, with a separate reusable HTTP session per worker. Cache access remains synchronized, and Aurora request starts are globally spaced by at least 0.12 seconds. Depending on the model, the selected abstract or title is sent to Aurora once per canonical publication; an unchanged text hash reuses the previous result. A classification based only on a title is marked `low_confidence:title_only_no_abstract` in `sdg_note` so downstream users can distinguish it from abstract-based results.
 5. **Abstract enrichment**: DSpace abstracts are read from both `dc.abstract*` and standard `dc.description.abstract*` metadata. The richer of current source text and cached text is reused before external fallbacks:
     - **Semantic Scholar**: Called via its official API using the paper's DOI. Requires an optional API key.
     - **Google Scholar**: Uses [SerpApi](https://serpapi.com/) when a key is provided; otherwise falls back to `scholarly` with free proxies (less reliable).
@@ -75,8 +75,8 @@ flowchart TB
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/jmiba/ERUA-publications.git
-   cd ERUA-publications
+   git clone https://github.com/jmiba/Aurora-SDG-Publication-Classifier.git
+   cd Aurora-SDG-Publication-Classifier
    ```
 2. **Create a virtual environment (recommended)**
 
@@ -110,6 +110,19 @@ flowchart TB
 6. **Use the interface**: Select one or more sources and one or more publication types. If OpenAlex is selected with a linked DSpace source, its configured institution is shown and used automatically. For an OpenAlex-only query, select an institution manually. Then choose the remaining options and press “Fetch works and build CSV.” Retrieval, deduplication and classification happen automatically.
 7. **Download your data**: After the fetch completes, you’ll see charts, a data preview, and buttons for Excel/CSV downloads.
    - Without a SerpApi key, Google Scholar lookups are skipped unless the optional `requirements-scholarly.txt` profile is installed.
+
+## Development checks
+
+Install the development profile and run the same checks as CI:
+
+```bash
+pip install -r requirements-dev.txt
+ruff check .
+mypy
+python -m unittest discover
+```
+
+GitHub Actions runs these checks on every push and pull request.
 
 ## Configuring DSpace data sources
 
@@ -157,8 +170,11 @@ The current adapter supports public DSpace REST APIs. Authenticated or private r
 The app relies on Streamlit’s secrets mechanism for API keys and optional untracked DSpace entries. Create a `.streamlit/secrets.toml` file with entries like:
 
 ```toml
-# A descriptive User-Agent string, including a contact email, is required for OpenAlex politeness.
-http_user_agent = "OpenAlex+Aurora SDG fetcher (mailto:you@example.com)"
+# Replace the reserved address below with a real contact email before using OpenAlex.
+http_user_agent = "Aurora-SDG-Publication-Classifier/1.0 (mailto:replace-me@your-institution.invalid)"
+
+# Base URL for the Aurora classifier. Required unless SDG classification is skipped.
+aurora_base_url = "https://aurora-sdg.labs.vu.nl/classifier/classify"
 
 # An optional API key for Semantic Scholar to improve abstract retrieval rates.
 # See: https://www.semanticscholar.org/product/api
@@ -174,7 +190,8 @@ serpapi_api_key = "YOUR_SERPAPI_API_KEY"
 # Sets the default start of the publication date slider, e.g., "2020-01-01".
 default_from_date = "2020-01-01"
 ```
-- `http_user_agent` is required.
+- `http_user_agent` is required for OpenAlex and must contain a non-placeholder contact email in `mailto:` form; OpenAlex runs are disabled otherwise.
+- `aurora_base_url` is required when an SDG classifier is selected. It can point to the public Aurora service shown above or a compatible self-hosted deployment.
 - `semantic_scholar_api_key` and `serpapi_api_key` are optional but highly recommended for reliable abstract retrieval.
 - `google_scholar_enabled` controls the final Google Scholar lookup. Without SerpApi, the app uses scholarly free proxies only when the optional profile is installed; otherwise it reports that the lookup is skipped.
 

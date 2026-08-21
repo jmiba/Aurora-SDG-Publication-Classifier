@@ -99,6 +99,7 @@ class RequestWithBackoffTests(unittest.TestCase):
                 "aurora-sdg-multi",
                 "Classification input",
                 session=session,
+                aurora_base_url="https://aurora.example/classify",
                 retries=2,
                 pause=0,
             )

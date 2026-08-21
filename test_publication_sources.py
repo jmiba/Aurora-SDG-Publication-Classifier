@@ -15,6 +15,7 @@ import cache_db
 import openalex_sdg
 from publication_sources import (
     DSpaceSource,
+    _reconstruct_openalex_abstract,
     deduplicate_publications,
     end_of_month,
     fetch_dspace_records,
@@ -22,7 +23,6 @@ from publication_sources import (
     normalize_openalex_work,
     parse_dspace_sources,
     reconcile_oa_pair,
-    _reconstruct_openalex_abstract,
 )
 
 
@@ -258,8 +258,8 @@ class PublicationSourceTests(unittest.TestCase):
                     "not-a-list": "no-positions",
                     "float": [1.5],
                     "negative": [-1],
-                    "null": [2],
-                    "blank": [3],
+                    None: [2],
+                    "": [3],
                 }
             ),
             "ok",
@@ -645,6 +645,7 @@ class PublicationSourceTests(unittest.TestCase):
                 "aurora-sdg-multi",
                 "Classification input",
                 session=session,
+                aurora_base_url="https://aurora.example/classify",
                 retries=2,
                 pause=0,
                 request_limiter=limiter,
@@ -696,6 +697,65 @@ class CacheMigrationTests(unittest.TestCase):
         cache_db.close_connection()
         cache_db.DB_PATH = self.original_path
         self.temp_dir.cleanup()
+
+    def test_wal_cache_uses_normal_synchronous_mode(self) -> None:
+        connection = cache_db._get_conn()
+
+        synchronous = connection.execute("PRAGMA synchronous").fetchone()[0]
+        journal_mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
+
+        self.assertEqual(synchronous, 1)
+        self.assertEqual(str(journal_mode).lower(), "wal")
+
+    def test_title_only_classification_is_marked_low_confidence(self) -> None:
+        publication = {
+            "publication_key": "openalex:W-TITLE-ONLY",
+            "source": "openalex",
+            "source_record_id": "W-TITLE-ONLY",
+            "source_record_key": "openalex:W-TITLE-ONLY",
+            "title": "A title long enough to classify without an abstract",
+            "abstract": "",
+        }
+        prediction = {
+            "predictions": [
+                {
+                    "prediction": 0.9,
+                    "sdg": {"code": "4", "name": "Quality Education"},
+                }
+            ]
+        }
+        with (
+            patch.object(openalex_sdg, "get_cached_work", return_value=None),
+            patch.object(openalex_sdg, "get_cached_sdg_result", return_value=None),
+            patch.object(
+                openalex_sdg,
+                "classify_text_aurora",
+                return_value=(prediction, ""),
+            ),
+            patch.object(openalex_sdg, "upsert_work"),
+            patch.object(openalex_sdg, "upsert_sdg_result") as upsert_sdg,
+        ):
+            result = openalex_sdg._enrich_and_classify_publication(
+                publication,
+                session_factory=Mock,
+                model="aurora-sdg-multi",
+                user_agent="test-agent",
+                semantic_scholar_api_key=None,
+                enable_google_scholar=False,
+                serpapi_api_key=None,
+                aurora_limiter=Mock(),
+                cancel_event=threading.Event(),
+                aurora_base_url="https://aurora.example/classify",
+            )
+
+        self.assertEqual(
+            result.row["sdg_note"],
+            "low_confidence:title_only_no_abstract",
+        )
+        self.assertEqual(
+            upsert_sdg.call_args.kwargs["sdg_note"],
+            "low_confidence:title_only_no_abstract",
+        )
 
     def test_v2_cache_keeps_source_records_and_text_hash(self) -> None:
         publication = {

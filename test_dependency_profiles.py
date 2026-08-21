@@ -4,15 +4,14 @@ from __future__ import annotations
 
 import importlib.util
 import inspect
-from importlib.metadata import version
-from pathlib import Path
 import subprocess
 import sys
 import unittest
+from importlib.metadata import version
+from pathlib import Path
 from unittest.mock import patch
 
 import openalex_sdg
-
 
 ROOT = Path(__file__).resolve().parent
 OPTIONAL_PACKAGES = {"scholarly", "httpx", "free-proxy"}

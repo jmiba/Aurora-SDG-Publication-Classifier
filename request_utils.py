@@ -10,7 +10,6 @@ from typing import Any, Callable, Optional
 
 import requests
 
-
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
 

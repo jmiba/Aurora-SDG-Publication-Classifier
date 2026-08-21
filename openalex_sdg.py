@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import json
 import hashlib
 import importlib.util
+import json
 import logging
 import re
 import threading
@@ -37,16 +37,15 @@ from request_utils import request_with_backoff
 # ------------------ CONFIG ------------------
 BASE_WORKS = "https://api.openalex.org/works"
 BASE_INSTITUTIONS = "https://api.openalex.org/institutions"
-AURORA_BASE = "https://aurora-sdg.labs.vu.nl/classifier/classify"
 SEMANTIC_SCHOLAR_API = "https://api.semanticscholar.org/graph/v1/paper/DOI:{doi}?fields=abstract"
-SERPAPI_GS_API = "https://serpapi.com/search" # New constant for SerpApi Google Scholar API
+SERPAPI_GS_API = "https://serpapi.com/search"
 
 
 PER_PAGE = 200  # OpenAlex max
 ENRICHMENT_MAX_WORKERS = 8
 AURORA_MIN_INTERVAL_SECONDS = 0.12
 DEFAULT_FROM_DATE = "2023-01-01"
-DEFAULT_USER_AGENT = "OpenAlex+Aurora SDG fetcher (mailto:you@example.com)"
+DEFAULT_USER_AGENT = "Aurora-SDG-Publication-Classifier"
 
 AURORA_MODELS = [
     ("aurora-sdg", "Aurora SDG mBERT (single-label, slower)"),
@@ -144,7 +143,7 @@ def search_institutions_by_name(
     name: str, user_agent: str = DEFAULT_USER_AGENT, limit: int = 10
 ) -> List[dict]:
     """Query the OpenAlex institutions endpoint using the user's keyword."""
-    params = {"search": name, "per-page": limit}
+    params: Dict[str, Any] = {"search": name, "per-page": limit}
     headers = {"User-Agent": user_agent}
     response = requests.get(BASE_INSTITUTIONS, params=params, headers=headers, timeout=30)
     response.raise_for_status()
@@ -371,7 +370,7 @@ def get_abstract_from_scholarly(
         return None
 
     try:
-        from scholarly import ProxyGenerator, scholarly  # type: ignore
+        from scholarly import ProxyGenerator, scholarly
     except Exception as exc:  # pragma: no cover - optional dependency import failure
         logging.warning("Optional scholarly fallback could not be imported: %s", exc)
         return None
@@ -391,7 +390,7 @@ def get_abstract_from_scholarly(
     target_title = _normalize_text_for_match(title)
     for attempt in range(1, retries + 1):
         try:
-            results = scholarly.search_pubs(query)  # type: ignore[arg-type]
+            results = scholarly.search_pubs(query)
             for _ in range(5):  # look at a few candidates
                 try:
                     candidate = next(results)
@@ -404,7 +403,7 @@ def get_abstract_from_scholarly(
                 if not (norm_candidate.startswith(target_title) or target_title.startswith(norm_candidate)):
                     continue
                 try:
-                    filled = scholarly.fill(candidate)  # type: ignore[arg-type]
+                    filled = scholarly.fill(candidate)
                 except Exception as fill_exc:  # pragma: no cover - external call
                     logging.debug("scholarly.fill failed: %s", fill_exc)
                     continue
@@ -488,6 +487,7 @@ def classify_text_aurora(
     model: str,
     text: str,
     session: requests.Session,
+    aurora_base_url: Optional[str] = None,
     user_agent: str = DEFAULT_USER_AGENT,
     retries: int = 3,
     pause: float = 0.4,
@@ -499,7 +499,9 @@ def classify_text_aurora(
     """
     if not text:
         return None, "no text"
-    url = f"{AURORA_BASE}/{model}"
+    if not aurora_base_url:
+        return None, "configuration_error:missing_aurora_base_url"
+    url = f"{aurora_base_url.rstrip('/')}/{model}"
     headers = {
         "User-Agent": user_agent,
         "Content-Type": "application/json; charset=utf-8",
@@ -596,7 +598,13 @@ def format_sdg_predictions(sdg_json: Optional[Any]) -> str:
         if code is None or score is None:
             continue
         try:
-            items.append((float(score), code, name))
+            items.append(
+                (
+                    float(score),
+                    str(code),
+                    str(name) if name is not None else "",
+                )
+            )
         except (TypeError, ValueError):
             continue
 
@@ -619,10 +627,10 @@ def _hash_classification_text(text: str) -> str:
 def _source_record_key_set(publication: Mapping[str, Any]) -> Set[str]:
     """Return all source-record keys represented by a publication."""
     keys: Set[str] = set()
-    for field in ("source_record_keys", "source_record_key"):
+    for key_field in ("source_record_keys", "source_record_key"):
         keys.update(
             part.strip()
-            for part in str(publication.get(field) or "").split(";")
+            for part in str(publication.get(key_field) or "").split(";")
             if part.strip()
         )
     for source_record in publication.get("_source_records") or []:
@@ -647,6 +655,14 @@ def _work_cache_changed(
     return len(abstract) > len(cached_abstract)
 
 
+def _append_sdg_note(note: str, flag: str) -> str:
+    """Append a machine-readable SDG note without duplicating it."""
+    notes = [part.strip() for part in str(note or "").split("; ") if part.strip()]
+    if flag not in notes:
+        notes.append(flag)
+    return "; ".join(notes)
+
+
 def _publication_recency_key(publication: Mapping[str, Any]) -> Tuple[str, str]:
     """Return a source-independent key that places newer publications first."""
     return (
@@ -666,6 +682,7 @@ def _enrich_and_classify_publication(
     serpapi_api_key: Optional[str],
     aurora_limiter: _RateLimiter,
     cancel_event: threading.Event,
+    aurora_base_url: Optional[str] = None,
 ) -> _PublicationEnrichment:
     """Enrich and classify one publication using the current worker's session."""
 
@@ -753,7 +770,7 @@ def _enrich_and_classify_publication(
         should_reuse = bool(cached_response.strip()) and (
             cached_hash == text_hash or (not cached_hash and not abstract_updated)
         )
-        if should_reuse:
+        if should_reuse and cached_sdg_entry is not None:
             reused_sdg = True
             raw_json = cached_response
             if raw_json:
@@ -765,16 +782,27 @@ def _enrich_and_classify_publication(
             sdg_note = cached_sdg_entry.get("sdg_note") or ""
             if not sdg_formatted and sdg_json:
                 sdg_formatted = format_sdg_predictions(sdg_json)
+            if sdg_json is not None and not abstract_text:
+                sdg_note = _append_sdg_note(
+                    sdg_note,
+                    "low_confidence:title_only_no_abstract",
+                )
         else:
             ensure_worker_active()
             sdg_json, sdg_note = classify_text_aurora(
                 model,
                 text_for_sdg,
-                session=session,
+                session,
+                aurora_base_url=aurora_base_url,
                 user_agent=user_agent,
                 request_limiter=aurora_limiter,
             )
             sdg_formatted = format_sdg_predictions(sdg_json) if sdg_json else ""
+            if sdg_json is not None and not abstract_text:
+                sdg_note = _append_sdg_note(
+                    sdg_note,
+                    "low_confidence:title_only_no_abstract",
+                )
             # The canonical work must exist before its FK-bound SDG result.
             publication["abstract"] = abstract_text
             upsert_work(publication)
@@ -827,6 +855,7 @@ def fetch_publications_with_sdg(
     semantic_scholar_api_key: Optional[str] = None,
     enable_google_scholar: bool = True,
     serpapi_api_key: Optional[str] = None,
+    aurora_base_url: Optional[str] = None,
     extra_institution_ids: Optional[Sequence[str]] = None,
     progress_callback: ProgressHook = None,
     cancel_check: Optional[Callable[[], bool]] = None,
@@ -963,6 +992,7 @@ def fetch_publications_with_sdg(
                         serpapi_api_key=serpapi_api_key,
                         aurora_limiter=aurora_limiter,
                         cancel_event=cancel_event,
+                        aurora_base_url=aurora_base_url,
                     )
                     future_to_index[future] = index
                 pending = set(future_to_index)
@@ -1024,6 +1054,7 @@ def fetch_works_with_sdg(
     semantic_scholar_api_key: Optional[str] = None,
     enable_google_scholar: bool = True,
     serpapi_api_key: Optional[str] = None,
+    aurora_base_url: Optional[str] = None,
     extra_institution_ids: Optional[Sequence[str]] = None,
     progress_callback: ProgressHook = None,
     cancel_check: Optional[Callable[[], bool]] = None,
@@ -1042,6 +1073,7 @@ def fetch_works_with_sdg(
         semantic_scholar_api_key=semantic_scholar_api_key,
         enable_google_scholar=enable_google_scholar,
         serpapi_api_key=serpapi_api_key,
+        aurora_base_url=aurora_base_url,
         extra_institution_ids=extra_institution_ids,
         progress_callback=progress_callback,
         cancel_check=cancel_check,
