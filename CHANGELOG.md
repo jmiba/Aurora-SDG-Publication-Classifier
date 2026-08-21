@@ -21,6 +21,8 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   preview row, retain edges for every selected repository institution instead
   of filtering around only the first one, and report when records such as
   OAI-PMH Dublin Core entries lack affiliation pairs.
+- Corrected the README workflow diagram syntax and abstract-fallback routing so
+  the complete flow renders reliably on GitHub.
 
 ## [1.0.0] - 2026-08-21
 

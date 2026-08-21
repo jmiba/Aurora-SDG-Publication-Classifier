@@ -37,33 +37,33 @@ A live demo is available at [Streamlit Cloud - Aurora SDG Publicaton Classifier]
 ## High-level workflow
 
 ```mermaid
-flowchart TB
-    A[User selects sources + options] --> B1[Fetch OpenAlex if selected]
-    A --> B2[Fetch each configured DSpace source]
-    A --> B4[Harvest each configured OAI-PMH source]
-    B1 --> B[Normalize source records]
+graph TD
+    A["User selects sources and options"] --> B1["Fetch OpenAlex if selected"]
+    A --> B2["Fetch each configured DSpace source"]
+    A --> B4["Harvest each configured OAI-PMH source"]
+    B1 --> B["Normalize source records"]
     B2 --> B
     B4 --> B
-    B --> B3[Deduplicate canonical publications]
-    B3 --> C{Abstract available?}
-    C -->|Yes| D[Use abstract for SDG classification]
-    C -->|No| E{Cached abstract?}
+    B --> B3["Deduplicate canonical publications"]
+    B3 --> C{"Abstract available?"}
+    C -->|Yes| D["Use abstract for SDG classification"]
+    C -->|No| E{"Cached abstract?"}
     E -->|Yes| D
-    E -->|No| F{Semantic Scholar via DOI}
+    E -->|No| F{"Semantic Scholar via DOI"}
     F -->|Found| D
-    F -->|Missing| G{Google Scholar enabled?}
-    I -.->|Missing| H[Use title for SDG classification]
+    F -->|Missing| G{"Google Scholar enabled?"}
+    G -->|Yes| I{"Google Scholar via SerpApi or optional scholarly proxies"}
     G -->|No| H
-    G -.->|Yes| I{Google Scholar via SerpApi or optional scholarly+proxies}
-    I -.->|Found| D
-    D --> J{SDG cached?}
+    I -->|Found| D
+    I -->|Missing| H["Use title for SDG classification"]
+    D --> J{"SDG cached?"}
     H --> J
-    J -->|Cache valid| K[Reuse SDG results]
-    J -->|Needs run| L[Call Aurora classifier]
-    L --> M[Store SDG + abstract in cache]
+    J -->|Cache valid| K["Reuse SDG results"]
+    J -->|Needs run| L["Call Aurora classifier"]
+    L --> M["Store SDG and abstract in cache"]
     K --> M
-    M --> N[Source-aware preview + charts]
-    N --> O[Download CSV/XLSX]
+    M --> N["Source-aware preview and charts"]
+    N --> O["Download CSV or XLSX"]
 ```
 
 ## How it works in the background
