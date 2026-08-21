@@ -320,12 +320,13 @@ def _migrate_legacy_rows(conn: sqlite3.Connection) -> None:
 
 
 def get_cached_publication(publication_key: str) -> Optional[Dict[str, Any]]:
-    conn = _get_conn()
-    row = conn.execute(
-        "SELECT * FROM canonical_works WHERE publication_key = ?",
-        (publication_key.strip(),),
-    ).fetchone()
-    return dict(row) if row else None
+    with _LOCK:
+        conn = _get_conn()
+        row = conn.execute(
+            "SELECT * FROM canonical_works WHERE publication_key = ?",
+            (publication_key.strip(),),
+        ).fetchone()
+        return dict(row) if row else None
 
 
 def get_cached_work(publication_key: str) -> Optional[Dict[str, Any]]:
@@ -643,16 +644,17 @@ def upsert_work(row: Mapping[str, Any], raw_record: Optional[Mapping[str, Any]] 
 
 
 def get_cached_sdg_result(publication_key: str, model: str) -> Optional[Dict[str, Any]]:
-    conn = _get_conn()
-    row = conn.execute(
-        """
-        SELECT text_hash, sdg_response, sdg_formatted, sdg_note, classified_at
-        FROM sdg_results_v2
-        WHERE publication_key = ? AND model = ?
-        """,
-        (publication_key.strip(), model.strip()),
-    ).fetchone()
-    return dict(row) if row else None
+    with _LOCK:
+        conn = _get_conn()
+        row = conn.execute(
+            """
+            SELECT text_hash, sdg_response, sdg_formatted, sdg_note, classified_at
+            FROM sdg_results_v2
+            WHERE publication_key = ? AND model = ?
+            """,
+            (publication_key.strip(), model.strip()),
+        ).fetchone()
+        return dict(row) if row else None
 
 
 def upsert_sdg_result(

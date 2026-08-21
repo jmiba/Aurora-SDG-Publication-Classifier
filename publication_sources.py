@@ -312,15 +312,27 @@ def normalize_dspace_object(search_object: Mapping[str, Any], source: DSpaceSour
 
 
 def _reconstruct_openalex_abstract(inverted_index: Any) -> str:
+    """Rebuild abstract text from an OpenAlex ``abstract_inverted_index``.
+
+    Tokens are placed at their index positions and joined in position order.
+    Malformed entries are skipped, except tokens that land on a position that
+    already holds text: those are concatenated instead of overwriting, so a
+    duplicated position never silently drops text.
+    """
     if not isinstance(inverted_index, Mapping) or not inverted_index:
         return ""
     positioned: Dict[int, str] = {}
     for token, positions in inverted_index.items():
         if not isinstance(positions, list):
             continue
+        token_text = "" if token is None else str(token).strip()
+        if not token_text:
+            continue
         for position in positions:
-            if isinstance(position, int) and position >= 0:
-                positioned[position] = str(token)
+            if not isinstance(position, int) or position < 0:
+                continue
+            existing = positioned.get(position)
+            positioned[position] = f"{existing} {token_text}" if existing else token_text
     return " ".join(positioned[index] for index in sorted(positioned)).strip()
 
 

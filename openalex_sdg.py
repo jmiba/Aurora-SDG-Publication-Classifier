@@ -6,8 +6,10 @@ import json
 import hashlib
 import logging
 import re
+import threading
 import time
 import unicodedata
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from html import unescape
@@ -45,6 +47,8 @@ SERPAPI_GS_API = "https://serpapi.com/search" # New constant for SerpApi Google 
 
 
 PER_PAGE = 200  # OpenAlex max
+ENRICHMENT_MAX_WORKERS = 8
+AURORA_MIN_INTERVAL_SECONDS = 0.12
 DEFAULT_FROM_DATE = "2023-01-01"
 DEFAULT_USER_AGENT = "OpenAlex+Aurora SDG fetcher (mailto:you@example.com)"
 
@@ -81,6 +85,41 @@ class FetchStats:
     total_source_records: int = 0
     duplicates_removed: int = 0
     sources_queried: List[str] = field(default_factory=list)
+
+
+@dataclass
+class _PublicationEnrichment:
+    row: Dict[str, Any]
+    title: str
+    source_abstract_missing: int = 0
+    openalex_abstract_missing: int = 0
+    ss_abstract_retrieved: int = 0
+    gs_abstract_retrieved: int = 0
+    total_abstracts_available: int = 0
+
+
+class _RateLimiter:
+    """Space request starts across workers without serializing response waits."""
+
+    def __init__(self, min_interval: float) -> None:
+        self._min_interval = max(0.0, min_interval)
+        self._lock = threading.Lock()
+        self._next_start = 0.0
+
+    def wait(self) -> None:
+        if self._min_interval <= 0:
+            return
+        with self._lock:
+            now = time.monotonic()
+            delay = self._next_start - now
+            if delay > 0:
+                time.sleep(delay)
+                now = time.monotonic()
+            self._next_start = max(self._next_start, now) + self._min_interval
+
+
+_SCHOLARLY_LOCK = threading.Lock()
+_AURORA_RATE_LIMITER = _RateLimiter(AURORA_MIN_INTERVAL_SECONDS)
 
 
 def too_short_for_model(model: str, text: str) -> bool:
@@ -142,28 +181,6 @@ def fetch_institution_lineage(
                 return []
             time.sleep(pause * attempt)
     return []
-
-def reconstruct_abstract(inv: Optional[dict]) -> str:
-    """Rebuild abstract text from OpenAlex 'abstract_inverted_index' or '_v3'."""
-    if not inv or not isinstance(inv, dict):
-        return ""
-    max_pos = -1
-    for positions in inv.values():
-        if positions:
-            max_pos = max(max_pos, max(positions))
-    if max_pos < 0:
-        return ""
-    tokens_by_pos = [""] * (max_pos + 1)
-    for token, positions in inv.items():
-        for p in positions:
-            if p < 0:
-                continue
-            if p >= len(tokens_by_pos):
-                tokens_by_pos.extend([""] * (p - len(tokens_by_pos) + 1))
-            tokens_by_pos[p] = (
-                (tokens_by_pos[p] + " " + token).strip() if tokens_by_pos[p] else token
-            )
-    return " ".join(tokens_by_pos).strip()
 
 def flatten_authors_and_institutions(authorships: Sequence[dict]) -> Tuple[str, str, List[dict]]:
     """
@@ -466,6 +483,7 @@ def classify_text_aurora(
     user_agent: str = DEFAULT_USER_AGENT,
     retries: int = 3,
     pause: float = 0.4,
+    request_limiter: Optional[_RateLimiter] = None,
 ) -> Tuple[Optional[Any], str]:
     """
     Calls Aurora SDG classifier via POST, returns (json or None, note string).
@@ -481,6 +499,8 @@ def classify_text_aurora(
     payload = {"text": text}
     for attempt in range(1, retries + 1):
         try:
+            if request_limiter:
+                request_limiter.wait()
             resp = session.post(
                 url, headers=headers, data=json.dumps(payload), timeout=60
             )
@@ -653,6 +673,154 @@ def _publication_recency_key(publication: Mapping[str, Any]) -> Tuple[str, str]:
     )
 
 
+def _enrich_and_classify_publication(
+    publication_value: Mapping[str, Any],
+    *,
+    session_factory: Callable[[], requests.Session],
+    model: str,
+    user_agent: str,
+    semantic_scholar_api_key: Optional[str],
+    enable_google_scholar: bool,
+    serpapi_api_key: Optional[str],
+    aurora_limiter: _RateLimiter,
+    cancel_event: threading.Event,
+) -> _PublicationEnrichment:
+    """Enrich and classify one publication using the current worker's session."""
+
+    def ensure_worker_active() -> None:
+        if cancel_event.is_set():
+            raise FetchCancelled()
+
+    ensure_worker_active()
+    publication = dict(publication_value)
+    publication_key = str(publication.get("publication_key") or "")
+    title = str(publication.get("title") or "")
+    authors_str = str(publication.get("authors") or "")
+    doi = str(publication.get("doi") or "")
+    session = session_factory()
+    result = _PublicationEnrichment(row={}, title=title)
+
+    cached_work = get_cached_work(publication_key) if publication_key else None
+    cached_abstract = clean_html_fragment(str((cached_work or {}).get("abstract") or ""))
+    abstract_text = clean_html_fragment(str(publication.get("abstract") or ""))
+    source_abstract_missing = not bool(abstract_text)
+    if len(cached_abstract) > len(abstract_text):
+        abstract_text = cached_abstract
+    if source_abstract_missing:
+        result.source_abstract_missing = 1
+        if "openalex" in str(publication.get("source") or "").split("; "):
+            result.openalex_abstract_missing = 1
+        if not abstract_text and doi:
+            ensure_worker_active()
+            semantic_abstract = get_abstract_from_semantic_scholar(
+                doi,
+                session=session,
+                api_key=semantic_scholar_api_key,
+            )
+            if semantic_abstract:
+                abstract_text = clean_html_fragment(semantic_abstract)
+                result.ss_abstract_retrieved = 1
+    if enable_google_scholar and not abstract_text:
+        ensure_worker_active()
+        if serpapi_api_key:
+            google_abstract = get_abstract_from_serpapi_google_scholar(
+                title,
+                authors_str,
+                api_key=serpapi_api_key,
+                session=session,
+                doi=doi,
+                publication_year=str(publication.get("publication_date") or ""),
+            )
+        else:
+            # scholarly mutates a module-level proxy/client, so only this fallback is
+            # serialized; SerpApi and all other network stages remain parallel.
+            with _SCHOLARLY_LOCK:
+                ensure_worker_active()
+                google_abstract = get_abstract_from_scholarly(title, authors_str)
+        if google_abstract:
+            abstract_text = clean_html_fragment(google_abstract)
+            result.gs_abstract_retrieved = 1
+
+    if abstract_text:
+        result.total_abstracts_available = 1
+    abstract_updated = bool(abstract_text and abstract_text != cached_abstract)
+    text_for_sdg = abstract_text or title
+    text_hash = _hash_classification_text(text_for_sdg)
+    sdg_json: Optional[Any] = None
+    sdg_note = ""
+    sdg_formatted = ""
+    cached_sdg_entry: Optional[Dict[str, Any]] = None
+    reused_sdg = False
+
+    if model == "skip":
+        sdg_note = "skipped: user selected 'skip'"
+    elif too_short_for_model(model, text_for_sdg):
+        sdg_note = f"skipped: {model} requires >={MIN_WORDS_BY_MODEL[model]} words"
+    else:
+        cached_sdg_entry = get_cached_sdg_result(publication_key, model)
+        cached_hash = str((cached_sdg_entry or {}).get("text_hash") or "")
+        cached_response = str((cached_sdg_entry or {}).get("sdg_response") or "")
+        should_reuse = bool(cached_response.strip()) and (
+            cached_hash == text_hash or (not cached_hash and not abstract_updated)
+        )
+        if should_reuse:
+            reused_sdg = True
+            raw_json = cached_response
+            if raw_json:
+                try:
+                    sdg_json = json.loads(raw_json)
+                except json.JSONDecodeError:
+                    sdg_json = None
+            sdg_formatted = cached_sdg_entry.get("sdg_formatted") or ""
+            sdg_note = cached_sdg_entry.get("sdg_note") or ""
+            if not sdg_formatted and sdg_json:
+                sdg_formatted = format_sdg_predictions(sdg_json)
+        else:
+            ensure_worker_active()
+            sdg_json, sdg_note = classify_text_aurora(
+                model,
+                text_for_sdg,
+                session=session,
+                user_agent=user_agent,
+                request_limiter=aurora_limiter,
+            )
+            sdg_formatted = format_sdg_predictions(sdg_json) if sdg_json else ""
+            # The canonical work must exist before its FK-bound SDG result.
+            publication["abstract"] = abstract_text
+            upsert_work(publication)
+            if sdg_json is not None:
+                upsert_sdg_result(
+                    publication_key=publication_key,
+                    model=model,
+                    sdg_response=sdg_json,
+                    sdg_formatted=sdg_formatted,
+                    sdg_note=sdg_note,
+                    text_hash=text_hash,
+                )
+
+    sdg_raw = json.dumps(sdg_json, ensure_ascii=False) if sdg_json is not None else ""
+    if reused_sdg and not sdg_raw and cached_sdg_entry:
+        sdg_raw = cached_sdg_entry.get("sdg_response") or ""
+
+    row_data = {
+        key: value for key, value in publication.items() if not str(key).startswith("_")
+    }
+    row_data.update(
+        {
+            "abstract": abstract_text,
+            "sdg_model": model,
+            "sdg_response": sdg_raw,
+            "sdg_formatted": sdg_formatted,
+            "sdg_note": sdg_note,
+        }
+    )
+    publication_for_cache = dict(row_data)
+    publication_for_cache["_source_records"] = publication.get("_source_records") or []
+    upsert_work(publication_for_cache)
+    result.row = row_data
+    return result
+
+
 def fetch_publications_with_sdg(
     *,
     include_openalex: bool,
@@ -766,134 +934,87 @@ def fetch_publications_with_sdg(
             publications = publications[:limit_rows]
         stats.total_expected = len(publications)
 
-        rows: List[Dict[str, Any]] = []
-        for publication in publications:
-            ensure_not_cancelled()
-            publication_key = str(publication.get("publication_key") or "")
-            title = str(publication.get("title") or "")
-            authors_str = str(publication.get("authors") or "")
-            doi = str(publication.get("doi") or "")
-            cached_work = get_cached_work(publication_key) if publication_key else None
-            cached_abstract = clean_html_fragment(
-                str((cached_work or {}).get("abstract") or "")
-            )
-            abstract_text = clean_html_fragment(str(publication.get("abstract") or ""))
-            source_abstract_missing = not bool(abstract_text)
-            if len(cached_abstract) > len(abstract_text):
-                abstract_text = cached_abstract
-            if source_abstract_missing:
-                stats.source_abstract_missing += 1
-                if "openalex" in str(publication.get("source") or "").split("; "):
-                    stats.openalex_abstract_missing += 1
-                if not abstract_text and doi:
-                    semantic_abstract = get_abstract_from_semantic_scholar(
-                        doi,
-                        session=session,
-                        api_key=semantic_scholar_api_key,
-                    )
-                    if semantic_abstract:
-                        abstract_text = clean_html_fragment(semantic_abstract)
-                        stats.ss_abstract_retrieved += 1
-            if enable_google_scholar and not abstract_text:
-                if serpapi_api_key:
-                    google_abstract = get_abstract_from_serpapi_google_scholar(
-                        title,
-                        authors_str,
-                        api_key=serpapi_api_key,
-                        session=session,
-                        doi=doi,
-                        publication_year=str(publication.get("publication_date") or ""),
-                    )
-                else:
-                    google_abstract = get_abstract_from_scholarly(title, authors_str)
-                if google_abstract:
-                    abstract_text = clean_html_fragment(google_abstract)
-                    stats.gs_abstract_retrieved += 1
+        rows_by_index: List[Optional[Dict[str, Any]]] = [None] * len(publications)
+        if publications:
+            cancel_event = threading.Event()
+            aurora_limiter = _AURORA_RATE_LIMITER
+            worker_local = threading.local()
+            worker_sessions: List[requests.Session] = []
+            worker_sessions_lock = threading.Lock()
 
-            if abstract_text:
-                stats.total_abstracts_available += 1
-            abstract_updated = bool(
-                abstract_text and abstract_text != cached_abstract
-            )
-            text_for_sdg = abstract_text or title
-            text_hash = _hash_classification_text(text_for_sdg)
-            sdg_json: Optional[Any] = None
-            sdg_note = ""
-            sdg_formatted = ""
-            cached_sdg_entry: Optional[Dict[str, Any]] = None
-            reused_sdg = False
+            def worker_session() -> requests.Session:
+                worker_session_value = getattr(worker_local, "session", None)
+                if worker_session_value is None:
+                    worker_session_value = requests.Session()
+                    worker_local.session = worker_session_value
+                    with worker_sessions_lock:
+                        worker_sessions.append(worker_session_value)
+                return worker_session_value
 
-            if model == "skip":
-                sdg_note = "skipped: user selected 'skip'"
-            elif too_short_for_model(model, text_for_sdg):
-                sdg_note = f"skipped: {model} requires >={MIN_WORDS_BY_MODEL[model]} words"
-            else:
-                cached_sdg_entry = get_cached_sdg_result(publication_key, model)
-                cached_hash = str((cached_sdg_entry or {}).get("text_hash") or "")
-                cached_response = str((cached_sdg_entry or {}).get("sdg_response") or "")
-                should_reuse = bool(cached_response.strip()) and (
-                    cached_hash == text_hash or (not cached_hash and not abstract_updated)
-                )
-                if should_reuse:
-                    reused_sdg = True
-                    raw_json = cached_response
-                    if raw_json:
-                        try:
-                            sdg_json = json.loads(raw_json)
-                        except json.JSONDecodeError:
-                            sdg_json = None
-                    sdg_formatted = cached_sdg_entry.get("sdg_formatted") or ""
-                    sdg_note = cached_sdg_entry.get("sdg_note") or ""
-                    if not sdg_formatted and sdg_json:
-                        sdg_formatted = format_sdg_predictions(sdg_json)
-                else:
-                    sdg_json, sdg_note = classify_text_aurora(
-                        model,
-                        text_for_sdg,
-                        session=session,
+            executor = ThreadPoolExecutor(
+                max_workers=min(ENRICHMENT_MAX_WORKERS, len(publications)),
+                thread_name_prefix="publication-enrichment",
+            )
+            pending = set()
+            try:
+                future_to_index = {}
+                for index, publication in enumerate(publications):
+                    ensure_not_cancelled()
+                    future = executor.submit(
+                        _enrich_and_classify_publication,
+                        publication,
+                        session_factory=worker_session,
+                        model=model,
                         user_agent=user_agent,
+                        semantic_scholar_api_key=semantic_scholar_api_key,
+                        enable_google_scholar=enable_google_scholar,
+                        serpapi_api_key=serpapi_api_key,
+                        aurora_limiter=aurora_limiter,
+                        cancel_event=cancel_event,
                     )
-                    sdg_formatted = format_sdg_predictions(sdg_json) if sdg_json else ""
-                    # The canonical work must exist before its FK-bound SDG result.
-                    publication["abstract"] = abstract_text
-                    upsert_work(publication)
-                    if sdg_json is not None:
-                        upsert_sdg_result(
-                            publication_key=publication_key,
-                            model=model,
-                            sdg_response=sdg_json,
-                            sdg_formatted=sdg_formatted,
-                            sdg_note=sdg_note,
-                            text_hash=text_hash,
+                    future_to_index[future] = index
+                pending = set(future_to_index)
+
+                while pending:
+                    ensure_not_cancelled()
+                    completed, pending = wait(
+                        pending,
+                        timeout=0.1,
+                        return_when=FIRST_COMPLETED,
+                    )
+                    for future in completed:
+                        enrichment = future.result()
+                        rows_by_index[future_to_index[future]] = enrichment.row
+                        stats.source_abstract_missing += enrichment.source_abstract_missing
+                        stats.openalex_abstract_missing += enrichment.openalex_abstract_missing
+                        stats.ss_abstract_retrieved += enrichment.ss_abstract_retrieved
+                        stats.gs_abstract_retrieved += enrichment.gs_abstract_retrieved
+                        stats.total_abstracts_available += (
+                            enrichment.total_abstracts_available
                         )
-                    time.sleep(0.12)
+                        stats.total_processed += 1
+                        if progress_callback:
+                            detail = (
+                                enrichment.title
+                                if len(enrichment.title) <= 120
+                                else f"{enrichment.title[:117]}..."
+                            )
+                            progress_callback(
+                                stats.total_processed,
+                                stats.total_expected,
+                                detail,
+                            )
+            except BaseException:
+                cancel_event.set()
+                for future in pending:
+                    future.cancel()
+                raise
+            finally:
+                executor.shutdown(wait=True, cancel_futures=True)
+                for worker_session_value in worker_sessions:
+                    worker_session_value.close()
 
-            sdg_raw = json.dumps(sdg_json, ensure_ascii=False) if sdg_json is not None else ""
-            if reused_sdg and not sdg_raw and cached_sdg_entry:
-                sdg_raw = cached_sdg_entry.get("sdg_response") or ""
-
-            row_data = {
-                key: value
-                for key, value in publication.items()
-                if not str(key).startswith("_")
-            }
-            row_data.update(
-                {
-                    "abstract": abstract_text,
-                    "sdg_model": model,
-                    "sdg_response": sdg_raw,
-                    "sdg_formatted": sdg_formatted,
-                    "sdg_note": sdg_note,
-                }
-            )
-            publication_for_cache = dict(row_data)
-            publication_for_cache["_source_records"] = publication.get("_source_records") or []
-            upsert_work(publication_for_cache)
-            rows.append(row_data)
-            stats.total_processed += 1
-            if progress_callback:
-                detail = title if len(title) <= 120 else f"{title[:117]}..."
-                progress_callback(stats.total_processed, stats.total_expected, detail)
+        rows = [row for row in rows_by_index if row is not None]
 
     if progress_callback:
         progress_callback(stats.total_processed, stats.total_expected, "Completed")

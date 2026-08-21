@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import tempfile
+import threading
 import unittest
 from datetime import date
 from pathlib import Path
@@ -21,6 +22,7 @@ from publication_sources import (
     normalize_openalex_work,
     parse_dspace_sources,
     reconcile_oa_pair,
+    _reconstruct_openalex_abstract,
 )
 
 
@@ -214,6 +216,72 @@ class PublicationSourceTests(unittest.TestCase):
         self.assertEqual(
             record["abstract"], "Abstract stored under the standard DSpace key."
         )
+
+    def test_openalex_abstract_reconstruction_joins_tokens_by_position(self) -> None:
+        self.assertEqual(
+            _reconstruct_openalex_abstract({"Study": [0], "solar": [1], "energy": [2]}),
+            "Study solar energy",
+        )
+        self.assertEqual(
+            _reconstruct_openalex_abstract({"energy": [2], "solar": [1], "Study": [0]}),
+            "Study solar energy",
+        )
+        self.assertEqual(
+            _reconstruct_openalex_abstract({"a": [0], "b": [2]}),
+            "a b",
+        )
+
+    def test_openalex_abstract_reconstruction_concatenates_duplicate_positions(self) -> None:
+        self.assertEqual(
+            _reconstruct_openalex_abstract(
+                {"alpha": [0], "beta": [0], "gamma": [1]}
+            ),
+            "alpha beta gamma",
+        )
+        self.assertEqual(
+            _reconstruct_openalex_abstract({"alpha": [0, 0], "gamma": [1]}),
+            "alpha alpha gamma",
+        )
+        self.assertEqual(
+            _reconstruct_openalex_abstract({"alpha": [0, 1], "gamma": [2]}),
+            "alpha alpha gamma",
+        )
+
+    def test_openalex_abstract_reconstruction_skips_malformed_entries(self) -> None:
+        self.assertEqual(_reconstruct_openalex_abstract(None), "")
+        self.assertEqual(_reconstruct_openalex_abstract(["not", "a", "mapping"]), "")
+        self.assertEqual(_reconstruct_openalex_abstract({}), "")
+        self.assertEqual(
+            _reconstruct_openalex_abstract(
+                {
+                    "ok": [0],
+                    "not-a-list": "no-positions",
+                    "float": [1.5],
+                    "negative": [-1],
+                    "null": [2],
+                    "blank": [3],
+                }
+            ),
+            "ok",
+        )
+
+    def test_duplicate_positions_survive_openalex_work_normalization(self) -> None:
+        work = normalize_openalex_work(
+            {
+                "id": "https://openalex.org/W-DUP-POS",
+                "title": "Duplicate position work",
+                "publication_date": "2024-01-01",
+                "doi": "10.1234/dup-pos",
+                "type": "article",
+                "abstract_inverted_index": {
+                    "alpha": [0],
+                    "beta": [0],
+                    "gamma": [1],
+                },
+                "authorships": [],
+            }
+        )
+        self.assertEqual(work["abstract"], "alpha beta gamma")
 
     def test_top_level_aurora_list_response_is_formatted(self) -> None:
         formatted = openalex_sdg.format_sdg_predictions(
@@ -538,6 +606,28 @@ class PublicationSourceTests(unittest.TestCase):
         )
 
         self.assertEqual(abstract, "Verified abstract.")
+
+    def test_aurora_retries_are_globally_rate_limited(self) -> None:
+        session = Mock()
+        session.post.side_effect = [
+            FakeResponse({}, status_code=429),
+            FakeResponse({"predictions": [{"prediction": 0.9}]}),
+        ]
+        limiter = Mock()
+
+        with patch.object(openalex_sdg.time, "sleep"):
+            prediction, note = openalex_sdg.classify_text_aurora(
+                "aurora-sdg-multi",
+                "Classification input",
+                session=session,
+                retries=2,
+                pause=0,
+                request_limiter=limiter,
+            )
+
+        self.assertEqual(prediction, {"predictions": [{"prediction": 0.9}]})
+        self.assertEqual(note, "")
+        self.assertEqual(limiter.wait.call_count, 2)
 
     def test_mixed_openalex_and_ror_institutions_use_separate_queries(self) -> None:
         with patch.object(
@@ -944,6 +1034,79 @@ class CacheMigrationTests(unittest.TestCase):
             )
             self.assertEqual(second_rows[0]["sdg_formatted"], "90% SDG 4 (Quality Education)")
             classify.assert_not_called()
+
+    def test_publications_are_enriched_concurrently_with_stable_output_order(self) -> None:
+        older = normalize_openalex_work(
+            {
+                "id": "https://openalex.org/W-OLDER-PARALLEL",
+                "title": "Older parallel publication",
+                "publication_date": "2024-01-01",
+                "doi": "10.1234/older-parallel",
+                "type": "article",
+                "authorships": [],
+            }
+        )
+        newer = normalize_openalex_work(
+            {
+                "id": "https://openalex.org/W-NEWER-PARALLEL",
+                "title": "Newer parallel publication",
+                "publication_date": "2025-01-01",
+                "doi": "10.1234/newer-parallel",
+                "type": "article",
+                "authorships": [],
+            }
+        )
+        barrier = threading.Barrier(2, timeout=3)
+        worker_thread_ids = set()
+        worker_session_ids = set()
+        tracking_lock = threading.Lock()
+        progress_thread_ids = []
+        main_thread_id = threading.get_ident()
+
+        def semantic_abstract(doi, *, session, api_key):
+            with tracking_lock:
+                worker_thread_ids.add(threading.get_ident())
+                worker_session_ids.add(id(session))
+            barrier.wait()
+            return f"Abstract for {doi}"
+
+        def progress_callback(done, expected, message):
+            progress_thread_ids.append(threading.get_ident())
+
+        with (
+            patch.object(
+                openalex_sdg,
+                "fetch_openalex_records",
+                return_value=([older, newer], 2),
+            ),
+            patch.object(
+                openalex_sdg,
+                "get_abstract_from_semantic_scholar",
+                side_effect=semantic_abstract,
+            ),
+        ):
+            rows, stats = openalex_sdg.fetch_publications_with_sdg(
+                include_openalex=True,
+                dspace_sources=[],
+                institution_id="https://openalex.org/I1",
+                from_date="2023-01-01",
+                to_date="2026-08-31",
+                work_type="article",
+                model="skip",
+                enable_google_scholar=False,
+                progress_callback=progress_callback,
+            )
+
+        self.assertEqual(
+            [row["title"] for row in rows],
+            ["Newer parallel publication", "Older parallel publication"],
+        )
+        self.assertEqual(stats.total_processed, 2)
+        self.assertEqual(stats.ss_abstract_retrieved, 2)
+        self.assertEqual(len(worker_thread_ids), 2)
+        self.assertEqual(len(worker_session_ids), 2)
+        self.assertTrue(progress_thread_ids)
+        self.assertEqual(set(progress_thread_ids), {main_thread_id})
 
     def test_richer_cached_abstract_is_used_instead_of_shorter_source_text(self) -> None:
         source_publication = normalize_openalex_work(
