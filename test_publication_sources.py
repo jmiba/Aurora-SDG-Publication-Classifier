@@ -283,16 +283,41 @@ class PublicationSourceTests(unittest.TestCase):
         )
         self.assertEqual(work["abstract"], "alpha beta gamma")
 
-    def test_top_level_aurora_list_response_is_formatted(self) -> None:
+    def test_documented_aurora_response_is_formatted(self) -> None:
         formatted = openalex_sdg.format_sdg_predictions(
-            [
-                {"label": "SDG 4 (Quality Education)", "score": 0.84},
-                {"label": "malformed", "score": "not-a-number"},
-                None,
-            ]
+            {
+                "model": "aurora-sdg-multi",
+                "predictions": [
+                    {
+                        "prediction": 0.21,
+                        "sdg": {"code": "13", "name": "Climate action"},
+                    },
+                    {
+                        "prediction": 0.84,
+                        "sdg": {"code": "4", "name": "Quality Education"},
+                    },
+                    {"prediction": "not-a-number", "sdg": {"code": "1"}},
+                    None,
+                ],
+            }
         )
 
-        self.assertEqual(formatted, "84% SDG 4 (Quality Education)")
+        self.assertEqual(
+            formatted,
+            "84% SDG 4 (Quality Education)\n21% SDG 13 (Climate action)",
+        )
+
+    def test_undocumented_aurora_response_shapes_are_rejected(self) -> None:
+        unsupported = [
+            [{"label": "SDG 4 (Quality Education)", "score": 0.84}],
+            {"labels": ["SDG 4"], "scores": [0.84]},
+            {"4": 0.84},
+            {"results": [{"sdg": "4", "score": 0.84}]},
+        ]
+
+        for response in unsupported:
+            with self.subTest(response=response):
+                self.assertEqual(openalex_sdg.format_sdg_predictions(response), "")
 
     def test_exact_doi_records_are_automatically_merged_with_provenance(self) -> None:
         openalex = normalize_openalex_work(

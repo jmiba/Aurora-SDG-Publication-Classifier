@@ -561,7 +561,7 @@ def get_abstract_from_semantic_scholar(
 def format_sdg_predictions(sdg_json: Optional[Any]) -> str:
     """
     Returns '\n'-joined strings like "84% SDG 10 (Reduced inequalities)".
-    Handles multiple API variants.
+    Parses the documented Aurora ``predictions`` response envelope.
     """
 
     def fmt_line(score, code, name):
@@ -578,81 +578,27 @@ def format_sdg_predictions(sdg_json: Optional[Any]) -> str:
 
     items: List[Tuple[float, str, str]] = []
 
-    preds = sdg_json.get("predictions") if isinstance(sdg_json, Mapping) else None
-    if isinstance(preds, list) and preds:
-        for entry in preds:
-            if not isinstance(entry, Mapping):
-                continue
-            sdg = entry.get("sdg") or {}
-            if not isinstance(sdg, Mapping):
-                continue
-            code = sdg.get("code")
-            name = sdg.get("name")
-            score = entry.get("prediction")
-            if code is None or score is None:
-                continue
-            try:
-                items.append((float(score), code, name))
-            except (TypeError, ValueError):
-                continue
+    if not isinstance(sdg_json, Mapping):
+        return ""
+    predictions = sdg_json.get("predictions")
+    if not isinstance(predictions, list):
+        return ""
 
-    if not items and isinstance(sdg_json, list):
-        for entry in sdg_json:
-            if not isinstance(entry, Mapping):
-                continue
-            label = entry.get("label")
-            score = entry.get("score")
-            if label is None or score is None:
-                continue
-            match = re.search(r"\bSDG\s*(\d+)", str(label), flags=re.I)
-            code = match.group(1) if match else ""
-            try:
-                items.append((float(score), code, str(label)))
-            except (TypeError, ValueError):
-                continue
-
-    if (
-        not items
-        and isinstance(sdg_json, Mapping)
-        and "labels" in sdg_json
-        and "scores" in sdg_json
-    ):
-        labels = sdg_json.get("labels") or []
-        scores = sdg_json.get("scores") or []
-        for label, score in zip(labels, scores):
-            match = re.search(r"\bSDG\s*(\d+)", str(label), flags=re.I)
-            code = match.group(1) if match else ""
-            try:
-                items.append((float(score), code, str(label)))
-            except (TypeError, ValueError):
-                continue
-
-    if not items and isinstance(sdg_json, Mapping):
-        numeric_keys = [key for key in sdg_json.keys() if str(key).isdigit()]
-        if numeric_keys:
-            for key in numeric_keys:
-                try:
-                    items.append((float(sdg_json[key]), key, None))
-                except (TypeError, ValueError):
-                    continue
-
-    if (
-        not items
-        and isinstance(sdg_json, Mapping)
-        and isinstance(sdg_json.get("results"), list)
-    ):
-        for entry in sdg_json["results"]:
-            if not isinstance(entry, Mapping):
-                continue
-            code = entry.get("sdg") or entry.get("code")
-            score = entry.get("score") or entry.get("prediction")
-            name = entry.get("name") or entry.get("label")
-            if code is None or score is None:
-                continue
-            try:
-                items.append((float(score), code, name))
-            except (TypeError, ValueError):
-                continue
+    for entry in predictions:
+        if not isinstance(entry, Mapping):
+            continue
+        sdg = entry.get("sdg")
+        if not isinstance(sdg, Mapping):
+            continue
+        code = sdg.get("code")
+        name = sdg.get("name")
+        score = entry.get("prediction")
+        if code is None or score is None:
+            continue
+        try:
+            items.append((float(score), code, name))
+        except (TypeError, ValueError):
+            continue
 
     if not items:
         return ""

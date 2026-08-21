@@ -8,8 +8,6 @@ import networkx as nx
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
-from xml.sax.saxutils import escape
-from zipfile import ZipFile, ZIP_DEFLATED
 
 import altair as alt
 import pandas as pd
@@ -987,117 +985,22 @@ def rows_to_csv_bytes(rows: List[Dict[str, Any]]) -> bytes:
     return buffer.getvalue().encode("utf-8")
 
 
-def _excel_col_name(idx: int) -> str:
-    """Convert a zero-based index to Excel-style column letters."""
-    name = ""
-    while idx >= 0:
-        idx, remainder = divmod(idx, 26)
-        name = chr(65 + remainder) + name
-        idx -= 1
-    return name
-
-
 def rows_to_excel_bytes(rows: List[Dict[str, Any]], columns: Optional[List[str]] = None) -> bytes:
-    """Write rows to an XLSX workbook without bringing in pandas/excel libs."""
-    columns = columns or CSV_FIELDNAMES
-    if not columns:
-        columns = list({key for row in rows for key in row.keys()})
-    sheet_rows: List[str] = []
-    row_index = 1
-    header_cells = []
-    for col_idx, col_name in enumerate(columns):
-        cell_ref = f"{_excel_col_name(col_idx)}{row_index}"
-        header_cells.append(
-            f'<c r="{cell_ref}" t="inlineStr"><is><t>{escape(str(col_name))}</t></is></c>'
-        )
-    sheet_rows.append(f'<row r="{row_index}">{"".join(header_cells)}</row>')
-    for row in rows:
-        row_index += 1
-        cells = []
-        for col_idx, col_name in enumerate(columns):
-            value = row.get(col_name, "")
-            text = "" if value is None else str(value)
-            cell_ref = f"{_excel_col_name(col_idx)}{row_index}"
-            cells.append(
-                f'<c r="{cell_ref}" t="inlineStr"><is><t>{escape(text)}</t></is></c>'
-            )
-        sheet_rows.append(f'<row r="{row_index}">{"".join(cells)}</row>')
-
-    sheet_xml = (
-        '<?xml version="1.0" encoding="UTF-8"?>'
-        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
-        f"<sheetData>{''.join(sheet_rows)}</sheetData>"
-        "</worksheet>"
-    )
-
-    workbook_xml = (
-        '<?xml version="1.0" encoding="UTF-8"?>'
-        '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
-        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
-        '<sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets>'
-        "</workbook>"
-    )
-
-    rels_xml = (
-        '<?xml version="1.0" encoding="UTF-8"?>'
-        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
-        "</Relationships>"
-    )
-
-    workbook_rels_xml = (
-        '<?xml version="1.0" encoding="UTF-8"?>'
-        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
-        "</Relationships>"
-    )
-
-    styles_xml = (
-        '<?xml version="1.0" encoding="UTF-8"?>'
-        '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"/>'
-    )
-
-    content_types_xml = (
-        '<?xml version="1.0" encoding="UTF-8"?>'
-        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
-        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
-        '<Default Extension="xml" ContentType="application/xml"/>'
-        '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
-        '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
-        '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
-        '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>'
-        '<Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>'
-        "</Types>"
-    )
-
-    core_xml = (
-        '<?xml version="1.0" encoding="UTF-8"?>'
-        '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" '
-        'xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" '
-        'xmlns:dcmitype="http://purl.org/dc/dcmitype/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">'
-        f"<dc:title>{escape('OpenAlex Results')}</dc:title>"
-        "</cp:coreProperties>"
-    )
-
-    app_xml = (
-        '<?xml version="1.0" encoding="UTF-8"?>'
-        '<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" '
-        'xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">'
-        "<Application>Streamlit</Application>"
-        "</Properties>"
-    )
-
+    """Serialize rows to a standards-compliant XLSX workbook."""
+    selected_columns = CSV_FIELDNAMES if columns is None else columns
+    if not selected_columns:
+        selected_columns = list(dict.fromkeys(key for row in rows for key in row))
+    dataframe = pd.DataFrame(rows, columns=selected_columns)
     buffer = io.BytesIO()
-    with ZipFile(buffer, "w", ZIP_DEFLATED) as zf:
-        zf.writestr("[Content_Types].xml", content_types_xml)
-        zf.writestr("_rels/.rels", rels_xml)
-        zf.writestr("docProps/core.xml", core_xml)
-        zf.writestr("docProps/app.xml", app_xml)
-        zf.writestr("xl/workbook.xml", workbook_xml)
-        zf.writestr("xl/_rels/workbook.xml.rels", workbook_rels_xml)
-        zf.writestr("xl/worksheets/sheet1.xml", sheet_xml)
-        zf.writestr("xl/styles.xml", styles_xml)
-    buffer.seek(0)
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        dataframe.to_excel(writer, index=False)
+        # Publication metadata is external input. Keep formula-looking strings as
+        # literal text rather than executable spreadsheet formulas.
+        worksheet = writer.book.active
+        for row in worksheet.iter_rows(min_row=2):
+            for cell in row:
+                if cell.data_type == "f":
+                    cell.data_type = "s"
     return buffer.getvalue()
 
 

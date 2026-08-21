@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import io
 import unittest
 from unittest.mock import patch
 
+from openpyxl import load_workbook
 from streamlit.testing.v1 import AppTest
 
 import app as app_module
@@ -12,6 +14,63 @@ from openalex_sdg import FetchStats
 
 
 class AppStateTests(unittest.TestCase):
+    def test_excel_export_round_trips_values_and_column_order(self) -> None:
+        rows = [
+            {
+                "title": '=HYPERLINK("https://example.invalid")',
+                "source_count": 3,
+                "abstract": "Formula-looking metadata stays text",
+            },
+            {
+                "title": "A & B <research>",
+                "source_count": 2,
+                "abstract": None,
+                "ignored": "not exported",
+            },
+            {
+                "title": "Über sustainability",
+                "source_count": 1,
+                "abstract": "First line\nSecond line",
+            },
+        ]
+
+        exported = app_module.rows_to_excel_bytes(
+            rows,
+            ["title", "source_count", "abstract"],
+        )
+        workbook = load_workbook(io.BytesIO(exported), data_only=False)
+        self.assertEqual(workbook.active["A2"].data_type, "s")
+        dataframe = app_module.pd.read_excel(
+            io.BytesIO(exported),
+            engine="openpyxl",
+            keep_default_na=False,
+        )
+
+        self.assertEqual(
+            list(dataframe.columns),
+            ["title", "source_count", "abstract"],
+        )
+        self.assertEqual(
+            dataframe.to_dict(orient="records"),
+            [
+                {
+                    "title": '=HYPERLINK("https://example.invalid")',
+                    "source_count": 3,
+                    "abstract": "Formula-looking metadata stays text",
+                },
+                {
+                    "title": "A & B <research>",
+                    "source_count": 2,
+                    "abstract": "",
+                },
+                {
+                    "title": "Über sustainability",
+                    "source_count": 1,
+                    "abstract": "First line\nSecond line",
+                },
+            ],
+        )
+
     def test_selecting_linked_dspace_source_uses_configured_institution(self) -> None:
         app = AppTest.from_file("app.py").run(timeout=30)
         app.multiselect[0].set_value(["openalex", "dspace:swps-share"])
