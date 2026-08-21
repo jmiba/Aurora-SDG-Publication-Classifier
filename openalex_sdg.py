@@ -80,6 +80,7 @@ class FetchStats:
     total_source_records: int = 0
     duplicates_removed: int = 0
     sources_queried: List[str] = field(default_factory=list)
+    semantic_scholar_auth_error_status: Optional[int] = None
 
 
 @dataclass
@@ -111,6 +112,33 @@ class _RateLimiter:
                 time.sleep(delay)
                 now = time.monotonic()
             self._next_start = max(self._next_start, now) + self._min_interval
+
+
+class _SemanticScholarRunState:
+    """Disable Semantic Scholar after credentials are rejected during one run."""
+
+    def __init__(self) -> None:
+        self._disabled = threading.Event()
+        self._lock = threading.Lock()
+        self._auth_error_status: Optional[int] = None
+
+    def should_attempt(self) -> bool:
+        return not self._disabled.is_set()
+
+    def disable_after_auth_error(self, status_code: int) -> None:
+        with self._lock:
+            if self._auth_error_status is None:
+                self._auth_error_status = status_code
+                logging.warning(
+                    "Semantic Scholar rejected authentication with HTTP %s; "
+                    "disabling it for the remainder of this fetch",
+                    status_code,
+                )
+            self._disabled.set()
+
+    def auth_error_status(self) -> Optional[int]:
+        with self._lock:
+            return self._auth_error_status
 
 
 _SCHOLARLY_LOCK = threading.Lock()
@@ -533,6 +561,7 @@ def get_abstract_from_semantic_scholar(
     api_key: Optional[str] = None,
     retries: int = 3,
     pause: float = 0.5,
+    on_auth_error: Optional[Callable[[int], None]] = None,
 ) -> Optional[str]:
     """
     Fetches abstract from Semantic Scholar using DOI.
@@ -557,7 +586,10 @@ def get_abstract_from_semantic_scholar(
         )
         data = resp.json()
         return data.get("abstract")
-    except requests.RequestException:
+    except requests.RequestException as exc:
+        status_code = getattr(getattr(exc, "response", None), "status_code", None)
+        if status_code in {401, 403} and on_auth_error:
+            on_auth_error(status_code)
         return None
 
 def format_sdg_predictions(sdg_json: Optional[Any]) -> str:
@@ -682,6 +714,7 @@ def _enrich_and_classify_publication(
     serpapi_api_key: Optional[str],
     aurora_limiter: _RateLimiter,
     cancel_event: threading.Event,
+    semantic_scholar_state: Optional[_SemanticScholarRunState] = None,
     aurora_base_url: Optional[str] = None,
 ) -> _PublicationEnrichment:
     """Enrich and classify one publication using the current worker's session."""
@@ -698,6 +731,7 @@ def _enrich_and_classify_publication(
     doi = str(publication.get("doi") or "")
     session = session_factory()
     result = _PublicationEnrichment(row={}, title=title)
+    semantic_state = semantic_scholar_state or _SemanticScholarRunState()
 
     cached_work = get_cached_work(publication_key) if publication_key else None
     cached_abstract = clean_html_fragment(str((cached_work or {}).get("abstract") or ""))
@@ -709,12 +743,13 @@ def _enrich_and_classify_publication(
         result.source_abstract_missing = 1
         if "openalex" in str(publication.get("source") or "").split("; "):
             result.openalex_abstract_missing = 1
-        if not abstract_text and doi:
+        if not abstract_text and doi and semantic_state.should_attempt():
             ensure_worker_active()
             semantic_abstract = get_abstract_from_semantic_scholar(
                 doi,
                 session=session,
                 api_key=semantic_scholar_api_key,
+                on_auth_error=semantic_state.disable_after_auth_error,
             )
             if semantic_abstract:
                 abstract_text = clean_html_fragment(semantic_abstract)
@@ -959,6 +994,7 @@ def fetch_publications_with_sdg(
         if publications:
             cancel_event = threading.Event()
             aurora_limiter = _AURORA_RATE_LIMITER
+            semantic_scholar_state = _SemanticScholarRunState()
             worker_local = threading.local()
             worker_sessions: List[requests.Session] = []
             worker_sessions_lock = threading.Lock()
@@ -988,6 +1024,7 @@ def fetch_publications_with_sdg(
                         model=model,
                         user_agent=user_agent,
                         semantic_scholar_api_key=semantic_scholar_api_key,
+                        semantic_scholar_state=semantic_scholar_state,
                         enable_google_scholar=enable_google_scholar,
                         serpapi_api_key=serpapi_api_key,
                         aurora_limiter=aurora_limiter,
@@ -1035,6 +1072,10 @@ def fetch_publications_with_sdg(
                 executor.shutdown(wait=True, cancel_futures=True)
                 for worker_session_value in worker_sessions:
                     worker_session_value.close()
+
+            stats.semantic_scholar_auth_error_status = (
+                semantic_scholar_state.auth_error_status()
+            )
 
         rows = [row for row in rows_by_index if row is not None]
 

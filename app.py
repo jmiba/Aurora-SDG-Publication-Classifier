@@ -1513,8 +1513,16 @@ def result_rows_from_payload(result_payload: Mapping[str, Any]) -> List[Dict[str
     return list(csv.DictReader(io.StringIO(csv_text)))
 
 
-def render_fetch_summary(stats: FetchStats, google_scholar_enabled: bool) -> None:
+def render_fetch_summary(
+    stats: FetchStats,
+    google_scholar_enabled: bool,
+    *,
+    semantic_scholar_api_key_configured: bool = False,
+) -> None:
     """Render the completed source, deduplication, and enrichment counts."""
+    semantic_scholar_auth_status = getattr(
+        stats, "semantic_scholar_auth_error_status", None
+    )
     gs_note = (
         f"; retrieved from Google Scholar: **{stats.gs_abstract_retrieved:,}**."
         if google_scholar_enabled
@@ -1530,6 +1538,20 @@ def render_fetch_summary(stats: FetchStats, google_scholar_enabled: bool) -> Non
         f"**{stats.source_abstract_missing:,}**; retrieved from Semantic Scholar: "
         f"**{stats.ss_abstract_retrieved:,}**{gs_note}"
     )
+    if semantic_scholar_auth_status in {401, 403}:
+        credential_detail = (
+            "the configured API key"
+            if semantic_scholar_api_key_configured
+            else "the unauthenticated request"
+        )
+        st.warning(
+            f"Semantic Scholar rejected {credential_detail} "
+            f"(HTTP {semantic_scholar_auth_status}). "
+            "Semantic Scholar enrichment was disabled for the remainder of this "
+            "fetch; other configured abstract fallbacks continued. Check "
+            "`semantic_scholar_api_key` in `.streamlit/secrets.toml`.",
+            icon=":material/key_off:",
+        )
 
 
 def render_result_preview(
@@ -1740,7 +1762,13 @@ def render_completed_result(
     csv_bytes = bytes(result_payload["csv_bytes"])
     filename = str(result_payload["filename"])
     all_rows = result_rows_from_payload(result_payload)
-    render_fetch_summary(stats, selection.google_scholar_enabled)
+    render_fetch_summary(
+        stats,
+        selection.google_scholar_enabled,
+        semantic_scholar_api_key_configured=bool(
+            selection.semantic_scholar_api_key
+        ),
+    )
     chart_rows, selected_title = render_result_preview(all_rows)
     render_result_charts(
         all_rows,

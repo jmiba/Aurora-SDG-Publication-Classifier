@@ -140,6 +140,34 @@ class AppStateTests(unittest.TestCase):
             "https://aurora.example/classify",
         )
 
+    def test_fetch_summary_warns_once_when_semantic_scholar_rejects_key(self) -> None:
+        stats = FetchStats(
+            total_expected=2,
+            total_processed=2,
+            openalex_abstract_missing=2,
+            ss_abstract_retrieved=0,
+            gs_abstract_retrieved=2,
+            total_source_records=2,
+            sources_queried=["OpenAlex"],
+            semantic_scholar_auth_error_status=401,
+        )
+
+        with (
+            patch.object(app_module.st, "success"),
+            patch.object(app_module.st, "warning") as warning,
+        ):
+            app_module.render_fetch_summary(
+                stats,
+                google_scholar_enabled=True,
+                semantic_scholar_api_key_configured=True,
+            )
+
+        warning.assert_called_once()
+        message = warning.call_args.args[0]
+        self.assertIn("rejected the configured API key", message)
+        self.assertIn("HTTP 401", message)
+        self.assertNotIn("stale-key", message)
+
     def test_excel_export_round_trips_values_and_column_order(self) -> None:
         rows = [
             {

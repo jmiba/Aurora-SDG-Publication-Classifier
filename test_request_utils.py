@@ -108,6 +108,22 @@ class RequestWithBackoffTests(unittest.TestCase):
         self.assertEqual(note, "http_error:429")
         self.assertEqual(session.post.call_count, 2)
 
+    def test_semantic_scholar_reports_rejected_credentials(self) -> None:
+        session = Mock()
+        session.get.return_value = response(401)
+        on_auth_error = Mock()
+
+        abstract = openalex_sdg.get_abstract_from_semantic_scholar(
+            "10.1234/rejected-key",
+            session=session,
+            api_key="stale-key",
+            on_auth_error=on_auth_error,
+        )
+
+        self.assertIsNone(abstract)
+        on_auth_error.assert_called_once_with(401)
+        self.assertEqual(session.get.call_count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1148,7 +1148,7 @@ class CacheMigrationTests(unittest.TestCase):
         progress_thread_ids = []
         main_thread_id = threading.get_ident()
 
-        def semantic_abstract(doi, *, session, api_key):
+        def semantic_abstract(doi, *, session, api_key, on_auth_error=None):
             with tracking_lock:
                 worker_thread_ids.add(threading.get_ident())
                 worker_session_ids.add(id(session))
@@ -1192,6 +1192,64 @@ class CacheMigrationTests(unittest.TestCase):
         self.assertEqual(len(worker_session_ids), 2)
         self.assertTrue(progress_thread_ids)
         self.assertEqual(set(progress_thread_ids), {main_thread_id})
+
+    def test_rejected_semantic_scholar_key_disables_later_requests(self) -> None:
+        publications = [
+            normalize_openalex_work(
+                {
+                    "id": f"https://openalex.org/W-SEMANTIC-AUTH-{index}",
+                    "title": f"Semantic Scholar auth test {index}",
+                    "publication_date": f"2025-01-0{index}",
+                    "doi": f"10.1234/semantic-auth-{index}",
+                    "type": "article",
+                    "authorships": [],
+                }
+            )
+            for index in (1, 2)
+        ]
+
+        def reject_key(doi, *, session, api_key, on_auth_error=None):
+            self.assertEqual(api_key, "stale-key")
+            self.assertIsNotNone(on_auth_error)
+            on_auth_error(401)
+            return None
+
+        with (
+            patch.object(openalex_sdg, "ENRICHMENT_MAX_WORKERS", 1),
+            patch.object(
+                openalex_sdg,
+                "fetch_openalex_records",
+                return_value=(publications, 2),
+            ),
+            patch.object(
+                openalex_sdg,
+                "get_abstract_from_semantic_scholar",
+                side_effect=reject_key,
+            ) as semantic_scholar,
+            patch.object(
+                openalex_sdg,
+                "get_abstract_from_serpapi_google_scholar",
+                return_value="Fallback abstract",
+            ) as google_scholar,
+        ):
+            rows, stats = openalex_sdg.fetch_publications_with_sdg(
+                include_openalex=True,
+                dspace_sources=[],
+                institution_id="https://openalex.org/I1",
+                from_date="2023-01-01",
+                to_date="2026-08-31",
+                work_type="article",
+                model="skip",
+                semantic_scholar_api_key="stale-key",
+                enable_google_scholar=True,
+                serpapi_api_key="serpapi-key",
+            )
+
+        self.assertEqual(semantic_scholar.call_count, 1)
+        self.assertEqual(google_scholar.call_count, 2)
+        self.assertEqual(stats.semantic_scholar_auth_error_status, 401)
+        self.assertEqual(stats.gs_abstract_retrieved, 2)
+        self.assertEqual([row["abstract"] for row in rows], ["Fallback abstract"] * 2)
 
     def test_richer_cached_abstract_is_used_instead_of_shorter_source_text(self) -> None:
         source_publication = normalize_openalex_work(
