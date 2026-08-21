@@ -198,6 +198,15 @@ default_from_date = "2020-01-01"
 
 A complete local template, including an optional DSpace entry, is provided in [`.streamlit/secrets.sample.toml`](.streamlit/secrets.sample.toml).
 
+## Release history
+
+See [CHANGELOG.md](CHANGELOG.md) for versioned changes. The first stable release
+is `1.0.0`.
+
+## License
+
+This project is available under the permissive [MIT License](LICENSE).
+
 ---
 
 Enjoy exploring how your institution’s publications map to the Sustainable Development Goals!
