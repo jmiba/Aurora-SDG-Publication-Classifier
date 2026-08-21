@@ -9,6 +9,7 @@ import re
 import time
 import unicodedata
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 from html import unescape
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
@@ -215,6 +216,64 @@ def _normalize_text_for_match(text: str) -> str:
     text = re.sub(r"[^\w\s]", " ", text).lower()
     return re.sub(r"\s+", "", text).strip()
 
+def _title_matches(query: str, candidate: str, *, threshold: float = 0.9) -> bool:
+    """Return whether two normalized titles are equal or highly similar."""
+    normalized_query = _normalize_text_for_match(query)
+    normalized_candidate = _normalize_text_for_match(candidate)
+    if not normalized_query or not normalized_candidate:
+        return False
+    if normalized_query == normalized_candidate:
+        return True
+    return SequenceMatcher(None, normalized_query, normalized_candidate).ratio() >= threshold
+
+def _normalize_doi(value: object) -> str:
+    """Return a comparable DOI token from a DOI value or URL."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    match = re.search(r"10\.\d{4,9}/[-._;()/:A-Z0-9]+", text, flags=re.I)
+    if not match:
+        return ""
+    return match.group(0).rstrip(".,;:)]}").lower()
+
+def _serpapi_result_doi(result: Mapping[str, Any]) -> str:
+    """Extract a DOI when SerpApi exposes one in structured metadata or links."""
+    publication_info = result.get("publication_info")
+    candidates: List[object] = [result.get("doi"), result.get("link")]
+    if isinstance(publication_info, Mapping):
+        candidates.extend(
+            [publication_info.get("doi"), publication_info.get("summary")]
+        )
+    resources = result.get("resources")
+    if isinstance(resources, list):
+        for resource in resources:
+            if isinstance(resource, Mapping):
+                candidates.extend([resource.get("doi"), resource.get("link")])
+    for candidate in candidates:
+        normalized = _normalize_doi(candidate)
+        if normalized:
+            return normalized
+    return ""
+
+def _publication_year(value: object) -> str:
+    """Extract a four-digit publication year from a date or metadata string."""
+    match = re.search(r"(?<!\d)(?:18|19|20|21)\d{2}(?!\d)", str(value or ""))
+    return match.group(0) if match else ""
+
+def _serpapi_result_year(result: Mapping[str, Any]) -> str:
+    """Extract a publication year from a SerpApi Scholar result when present."""
+    publication_info = result.get("publication_info")
+    candidates: List[object] = [result.get("year"), result.get("publication_year")]
+    if isinstance(publication_info, Mapping):
+        candidates.extend(
+            [publication_info.get("year"), publication_info.get("summary")]
+        )
+    for candidate in candidates:
+        year = _publication_year(candidate)
+        if year:
+            return year
+    return ""
+
 def _normalize_author_token(name: str) -> str:
     """Produce a stable author token (surname or first token if comma style)."""
     if not name:
@@ -233,10 +292,12 @@ def get_abstract_from_serpapi_google_scholar(
     authors: str,
     api_key: Optional[str],
     session: requests.Session,
+    doi: Optional[str] = None,
+    publication_year: Optional[str] = None,
     retries: int = 3,
     pause: float = 0.5,
 ) -> Optional[str]:
-    """Fetches abstract from Google Scholar via SerpApi."""
+    """Fetch an abstract from a closely matching Google Scholar result."""
     if not api_key or not title:
         return None
 
@@ -260,20 +321,23 @@ def get_abstract_from_serpapi_google_scholar(
                 continue
             resp.raise_for_status()
             data = resp.json()
-            norm_title = _normalize_text_for_match(title)
+            expected_doi = _normalize_doi(doi)
+            expected_year = _publication_year(publication_year)
 
             for result in data.get("organic_results", []):
                 result_title = result.get("title")
-                # Basic title match to ensure we're looking at the right paper
-                if not result_title:
+                if not result_title or not _title_matches(title, result_title):
                     continue
-                norm_result_title = _normalize_text_for_match(result_title)
-                # Relaxed matching: check if one is a prefix of the other.
-                if norm_result_title.startswith(norm_title) or norm_title.startswith(norm_result_title):
-                    abstract = result.get("snippet") # SerpApi often provides abstract in 'snippet'
-                    if abstract:
-                        logging.info("SerpApi Google Scholar abstract retrieved for '%s'", title)
-                        return clean_html_fragment(abstract)
+                result_doi = _serpapi_result_doi(result)
+                if result_doi and result_doi != expected_doi:
+                    continue
+                result_year = _serpapi_result_year(result)
+                if result_year and result_year != expected_year:
+                    continue
+                abstract = result.get("snippet")
+                if abstract:
+                    logging.info("SerpApi Google Scholar abstract retrieved for '%s'", title)
+                    return clean_html_fragment(abstract)
 
             logging.info("Serpapi Google Scholar abstract not found for '%s' (no matching results with snippets)", title)
             return None
@@ -737,6 +801,8 @@ def fetch_publications_with_sdg(
                         authors_str,
                         api_key=serpapi_api_key,
                         session=session,
+                        doi=doi,
+                        publication_year=str(publication.get("publication_date") or ""),
                     )
                 else:
                     google_abstract = get_abstract_from_scholarly(title, authors_str)

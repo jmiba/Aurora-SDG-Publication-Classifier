@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from datetime import date
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import cache_db
 import openalex_sdg
@@ -447,6 +447,97 @@ class PublicationSourceTests(unittest.TestCase):
 
         self.assertIn("institutions.id:I123", filter_value)
         self.assertIn("type:article|book|book-chapter", filter_value)
+
+    def test_serpapi_rejects_similar_but_different_title(self) -> None:
+        response = FakeResponse(
+            {
+                "organic_results": [
+                    {
+                        "title": "Climate change and health",
+                        "snippet": "This belongs to a different publication.",
+                    },
+                    {
+                        "title": "Climate change",
+                        "snippet": "This is the correct abstract.",
+                        "publication_info": {
+                            "summary": "A Researcher - Example Journal, 2024"
+                        },
+                    },
+                ]
+            }
+        )
+        session = Mock()
+        session.get.return_value = response
+
+        abstract = openalex_sdg.get_abstract_from_serpapi_google_scholar(
+            "Climate change",
+            "A Researcher",
+            api_key="test-key",
+            session=session,
+            publication_year="2024-04-01",
+        )
+
+        self.assertEqual(abstract, "This is the correct abstract.")
+
+    def test_serpapi_rejects_conflicting_doi_or_year(self) -> None:
+        response = FakeResponse(
+            {
+                "organic_results": [
+                    {
+                        "title": "Climate change",
+                        "doi": "https://doi.org/10.1000/wrong",
+                        "snippet": "Wrong DOI.",
+                        "publication_info": {"summary": "Example Journal, 2024"},
+                    },
+                    {
+                        "title": "Climate change",
+                        "doi": "10.1000/correct",
+                        "snippet": "Wrong year.",
+                        "publication_info": {"summary": "Example Journal, 2023"},
+                    },
+                ]
+            }
+        )
+        session = Mock()
+        session.get.return_value = response
+
+        abstract = openalex_sdg.get_abstract_from_serpapi_google_scholar(
+            "Climate change",
+            "A Researcher",
+            api_key="test-key",
+            session=session,
+            doi="https://doi.org/10.1000/correct",
+            publication_year="2024",
+        )
+
+        self.assertIsNone(abstract)
+
+    def test_serpapi_accepts_matching_normalized_doi_and_year(self) -> None:
+        response = FakeResponse(
+            {
+                "organic_results": [
+                    {
+                        "title": "Climate change",
+                        "link": "https://doi.org/10.1000/CORRECT",
+                        "snippet": "Verified abstract.",
+                        "publication_info": {"summary": "Example Journal, 2024"},
+                    }
+                ]
+            }
+        )
+        session = Mock()
+        session.get.return_value = response
+
+        abstract = openalex_sdg.get_abstract_from_serpapi_google_scholar(
+            "Climate change",
+            "A Researcher",
+            api_key="test-key",
+            session=session,
+            doi="doi:10.1000/correct",
+            publication_year="2024-04-01",
+        )
+
+        self.assertEqual(abstract, "Verified abstract.")
 
     def test_mixed_openalex_and_ror_institutions_use_separate_queries(self) -> None:
         with patch.object(
