@@ -19,6 +19,7 @@ from typing import (
     Sequence,
     Set,
     Tuple,
+    Union,
     cast,
 )
 
@@ -32,6 +33,7 @@ import streamlit as st
 from openalex_sdg import (
     AURORA_MODELS,
     DEFAULT_USER_AGENT,
+    OPENALEX_WORK_TYPES,
     FetchCancelled,
     FetchStats,
     fetch_institution_lineage,
@@ -42,7 +44,13 @@ from openalex_sdg import (
     scholarly_fallback_available,
     search_institutions_by_name,
 )
-from publication_sources import DSpaceSource, end_of_month, parse_dspace_sources
+from publication_sources import (
+    DSpaceSource,
+    OaiPmhSource,
+    end_of_month,
+    parse_dspace_sources,
+    parse_oai_sources,
+)
 
 SECRET_HTTP_USER_AGENT = "http_user_agent"
 SECRET_AURORA_BASE_URL = "aurora_base_url"
@@ -129,6 +137,7 @@ class QuerySelection:
     google_scholar_enabled: bool
     serpapi_api_key: Optional[str]
     aurora_base_url: Optional[str]
+    oai_sources: Tuple[OaiPmhSource, ...] = ()
 SDG_COLORS = {
     "1": "#e5243b",   # No Poverty
     "2": "#dda63a",   # Zero Hunger
@@ -310,6 +319,23 @@ def resolve_dspace_sources() -> List[DSpaceSource]:
         except (OSError, tomllib.TOMLDecodeError):
             public_sources = []
     secret_sources = parse_dspace_sources(_load_secrets().get("dspace_sources"))
+    sources_by_id = {source.id: source for source in public_sources}
+    sources_by_id.update({source.id: source for source in secret_sources})
+    return list(sources_by_id.values())
+
+
+def resolve_oai_sources() -> List[OaiPmhSource]:
+    """Load tracked public OAI-PMH sources, with secrets-based additions/overrides."""
+    public_sources: List[OaiPmhSource] = []
+    config_path = Path("oai_sources.toml")
+    if config_path.is_file():
+        try:
+            with config_path.open("rb") as handle:
+                public_config = tomllib.load(handle)
+            public_sources = parse_oai_sources(public_config.get("oai_sources"))
+        except (OSError, tomllib.TOMLDecodeError):
+            public_sources = []
+    secret_sources = parse_oai_sources(_load_secrets().get("oai_sources"))
     sources_by_id = {source.id: source for source in public_sources}
     sources_by_id.update({source.id: source for source in secret_sources})
     return list(sources_by_id.values())
@@ -564,13 +590,28 @@ def _network_edge_groups(
     min_secondary_weight: int,
 ) -> Tuple[Dict[Tuple[str, str], int], List[Tuple[Tuple[str, str], int]]]:
     """Split origin links from ranked links between the origin's partners."""
+    return _network_edge_groups_for_origins(
+        edge_counts,
+        {selected_label},
+        min_secondary_weight,
+    )
+
+
+def _network_edge_groups_for_origins(
+    edge_counts: Mapping[Tuple[str, str], int],
+    selected_labels: Set[str],
+    min_secondary_weight: int,
+) -> Tuple[Dict[Tuple[str, str], int], List[Tuple[Tuple[str, str], int]]]:
+    """Split links from all selected origins and links between their partners."""
     primary_edges = {
-        edge: weight for edge, weight in edge_counts.items() if selected_label in edge
+        edge: weight
+        for edge, weight in edge_counts.items()
+        if selected_labels.intersection(edge)
     }
     neighbors: Set[str] = set()
     for a, b in primary_edges:
         neighbors.update((a, b))
-    neighbors.discard(selected_label)
+    neighbors.difference_update(selected_labels)
     secondary_edges = sorted(
         (
             (edge, weight)
@@ -622,6 +663,7 @@ def render_institution_network(
     min_second_level_weight: int = 2,
     max_secondary_edges: int = MAX_SECONDARY_NETWORK_EDGES,
     theme_type: Optional[str] = None,
+    selected_institution_ids: Sequence[str] = (),
 ) -> None:
     """Render a simple 3D co-affiliation network of institutions from the selected period."""
     if not rows:
@@ -653,6 +695,7 @@ def render_institution_network(
     edge_counts: Dict[Tuple[str, str], int] = {}
     inst_labels: Dict[str, str] = {}
     inst_countries: Dict[str, str] = {}
+    eligible_publication_rows = 0
     for _, row in df.iterrows():
         aff_json = row.get("institution_affiliations_json")
         try:
@@ -687,16 +730,32 @@ def render_institution_network(
                 inst_countries.setdefault(inst_id, country)
         if len(unique_ids) < 2:
             continue
+        eligible_publication_rows += 1
         for a, b in itertools.combinations(sorted(unique_ids), 2):
             edge_counts[(a, b)] = edge_counts.get((a, b), 0) + 1
 
+    st.caption(
+        "Network coverage: "
+        f"{eligible_publication_rows:,} of {len(df):,} publications contain at "
+        "least two institution identifiers. The graph uses the combined result "
+        "set; records without affiliation pairs—including many OAI-PMH Dublin "
+        "Core records—remain in the preview, other charts, and exports but cannot "
+        "form co-affiliation edges."
+    )
+
     if not edge_counts:
-        st.info("No co-affiliations found to build a network.")
+        st.info(
+            "No co-affiliations found to build a network. At least two structured "
+            "institution identifiers must occur on the same publication."
+        )
         return
 
     # Collapse IDs that share the same label to avoid duplicate-looking nodes.
     id_to_label: Dict[str, str] = {}
-    for inst_id in set(inst_labels.keys()) | set(inst_countries.keys()):
+    edge_institution_ids = {
+        inst_id for edge in edge_counts for inst_id in edge
+    }
+    for inst_id in edge_institution_ids:
         country_code = inst_countries.get(inst_id)
         base_label = inst_labels.get(inst_id) or inst_id.split('/')[-1] or inst_id
         if country_code:
@@ -716,16 +775,36 @@ def render_institution_network(
         st.info("No co-affiliations found to build a network.")
         return
 
-    # If we have the selected institution in our labels, keep only edges attached to it.
-    selected_label = None
-    if selected_institution_id:
-        selected_label = id_to_label.get(selected_institution_id) or id_to_label.get(
-            selected_institution_id.strip().split("/")[-1]
+    # If selected institutions occur in the data, retain links from every origin.
+    configured_institution_ids = list(
+        dict.fromkeys(
+            institution_id
+            for institution_id in (
+                selected_institution_id,
+                *selected_institution_ids,
+            )
+            if institution_id
         )
-    if selected_label:
-        primary_edges, secondary_edges = _network_edge_groups(
+    )
+    id_alias_to_label: Dict[str, str] = {}
+    for institution_id, label in id_to_label.items():
+        normalized_id = institution_id.rstrip("/")
+        id_alias_to_label[institution_id] = label
+        id_alias_to_label[normalized_id] = label
+        id_alias_to_label[normalized_id.split("/")[-1]] = label
+    selected_labels: Set[str] = set()
+    for institution_id in configured_institution_ids:
+        selected_label = (
+            id_alias_to_label.get(institution_id)
+            or id_alias_to_label.get(institution_id.rstrip("/"))
+            or id_alias_to_label.get(institution_id.rstrip("/").split("/")[-1])
+        )
+        if selected_label:
+            selected_labels.add(selected_label)
+    if selected_labels:
+        primary_edges, secondary_edges = _network_edge_groups_for_origins(
             label_edge_counts,
-            selected_label,
+            selected_labels,
             min_second_level_weight,
         )
         if primary_edges:
@@ -736,7 +815,7 @@ def render_institution_network(
                     value=False,
                     key="show_secondary_coaffiliations",
                     help=(
-                        "Primary edges connect the selected institution to its "
+                        "Primary edges connect the selected institutions to their "
                         "partners. Enable this to add the strongest links between "
                         "those partner institutions."
                     ),
@@ -773,10 +852,10 @@ def render_institution_network(
         ),
     )
     candidate_nodes = _network_labels_matching_query(list(degree), node_filter)
-    if node_filter.strip() and selected_label and selected_label in degree:
-        candidate_nodes.add(selected_label)
+    if node_filter.strip():
+        candidate_nodes.update(selected_labels.intersection(degree))
 
-    # Limit to top nodes by degree after label filtering, but keep the selected node.
+    # Limit by degree after label filtering, but keep every selected origin.
     top_nodes = set(
         sorted(
             candidate_nodes,
@@ -784,8 +863,7 @@ def render_institution_network(
             reverse=True,
         )[:max_nodes]
     )
-    if selected_label and selected_label in degree:
-        top_nodes.add(selected_label)
+    top_nodes.update(selected_labels.intersection(degree))
     filtered_edges = {
         (a, b): w
         for (a, b), w in label_edge_counts.items()
@@ -798,35 +876,23 @@ def render_institution_network(
                 "No connected institution labels match this filter. "
                 "Try a different or broader name fragment."
             )
-            top_nodes = (
-                {selected_label}
-                if selected_label and selected_label in degree
-                else set()
-            )
+            top_nodes = selected_labels.intersection(degree)
         else:
             st.info("Co-affiliations exist but were filtered out by the top-n limit.")
             return
     if node_filter.strip() and filtered_edges:
-        visible_partner_count = len(top_nodes - ({selected_label} if selected_label else set()))
+        visible_partner_count = len(top_nodes - selected_labels)
         st.caption(
             f"Label filter retained {visible_partner_count:,} matching institution"
             f"{'s' if visible_partner_count != 1 else ''}"
-            + (" plus the selected origin." if selected_label else ".")
+            + (
+                f" plus {len(selected_labels):,} selected origin"
+                f"{'s' if len(selected_labels) != 1 else ''}."
+                if selected_labels
+                else "."
+            )
         )
 
-    # Layout: keep selected at center (if present), scatter others randomly.
-
-    node_positions: Dict[str, Tuple[float, float, float]] = {}
-    if selected_label and selected_label in top_nodes:
-        node_positions[selected_label] = (0.0, 0.0, 0.0)
-
-    primary_neighbors: Set[str] = set()
-    if selected_label:
-        for a, b in filtered_edges.keys():
-            if a == selected_label:
-                primary_neighbors.add(b)
-            elif b == selected_label:
-                primary_neighbors.add(a)
     # Use a spring layout to keep connected nodes closer together.
     G = nx.Graph()
     for node in top_nodes:
@@ -841,8 +907,10 @@ def render_institution_network(
         center=(0, 0, 0),
         seed=42,
     )
-    if selected_label and selected_label in pos:
-        pos[selected_label] = [0.0, 0.0, 0.0]
+    if len(selected_labels) == 1:
+        selected_label = next(iter(selected_labels))
+        if selected_label in pos:
+            pos[selected_label] = [0.0, 0.0, 0.0]
 
     node_positions = {
         node: tuple((coords.tolist() if hasattr(coords, "tolist") else list(coords))[:3])
@@ -1332,12 +1400,14 @@ def rows_to_excel_bytes(rows: List[Dict[str, Any]], columns: Optional[List[str]]
 
 def render_source_selector(
     dspace_sources: Sequence[DSpaceSource],
-) -> Tuple[bool, List[DSpaceSource]]:
-    """Let one automated run query OpenAlex and any configured DSpace sources."""
+    oai_sources: Sequence[OaiPmhSource],
+) -> Tuple[bool, List[DSpaceSource], List[OaiPmhSource]]:
+    """Let one automated run query OpenAlex and configured repository sources."""
     st.header("Query setup", divider="rainbow")
     st.subheader("1. Publication sources", divider="violet")
     option_labels = {"openalex": "OpenAlex"}
     option_labels.update({f"dspace:{source.id}": source.label for source in dspace_sources})
+    option_labels.update({f"oai:{source.id}": source.label for source in oai_sources})
     selected_keys = st.multiselect(
         "Sources to query",
         options=list(option_labels),
@@ -1349,9 +1419,15 @@ def render_source_selector(
         key.split(":", 1)[1] for key in selected_keys if key.startswith("dspace:")
     }
     selected_dspace = [source for source in dspace_sources if source.id in selected_dspace_ids]
-    if not dspace_sources:
-        st.caption("No DSpace sources are configured; add `[[dspace_sources]]` entries to secrets.toml.")
-    return "openalex" in selected_keys, selected_dspace
+    selected_oai_ids = {
+        key.split(":", 1)[1] for key in selected_keys if key.startswith("oai:")
+    }
+    selected_oai = [source for source in oai_sources if source.id in selected_oai_ids]
+    if not dspace_sources and not oai_sources:
+        st.caption(
+            "No repository sources are configured; add DSpace or OAI-PMH source entries."
+        )
+    return "openalex" in selected_keys, selected_dspace, selected_oai
 
 
 def render_institution_selector(user_agent: str) -> Tuple[Optional[str], bool]:
@@ -1437,13 +1513,13 @@ def render_institution_selector(user_agent: str) -> Tuple[Optional[str], bool]:
 
 
 def render_configured_institution_selector(
-    dspace_sources: Sequence[DSpaceSource],
+    repository_sources: Sequence[Union[DSpaceSource, OaiPmhSource]],
 ) -> Tuple[List[str], bool]:
-    """Use institution identifiers attached to the selected DSpace sources."""
+    """Use institution identifiers attached to the selected repository sources."""
     st.subheader("2. OpenAlex institutions", divider="violet")
     institution_ids: List[str] = []
     missing_labels: List[str] = []
-    for source in dspace_sources:
+    for source in repository_sources:
         query_id = source.openalex_query_id
         if not query_id:
             missing_labels.append(source.label)
@@ -1476,14 +1552,11 @@ def render_configured_institution_selector(
 def render_publication_type_selector(
     include_openalex: bool,
     dspace_sources: Sequence[DSpaceSource],
+    oai_sources: Sequence[OaiPmhSource] = (),
 ) -> List[str]:
     """Display all publication types supported by the selected sources."""
     st.subheader("3. Publication types", divider="blue")
-    openalex_types = [
-        "article", "book", "book-chapter", "proceedings-article", "proceedings",
-        "reference-entry", "report", "dissertation", "dataset", "software",
-        "review", "editorial", "letter", "standard", "other",
-    ]
+    openalex_types = list(OPENALEX_WORK_TYPES)
     entity_type_mappings = {
         "article": ["article"],
         "book": ["book", "book-chapter"],
@@ -1496,11 +1569,20 @@ def render_publication_type_selector(
             for work_type in entity_type_mappings.get(normalized, [normalized]):
                 if work_type and work_type not in dspace_types:
                     dspace_types.append(work_type)
+    oai_types = list(
+        dict.fromkeys(
+            work_type
+            for source in oai_sources
+            for work_type in source.publication_types
+            if work_type
+        )
+    )
     types = list(
         dict.fromkeys(
             [
                 *(openalex_types if include_openalex else []),
                 *dspace_types,
+                *oai_types,
             ]
         )
     )
@@ -1512,6 +1594,7 @@ def render_publication_type_selector(
         "software": "Software",
         "proceedings-article": "Proceedings articles",
         "reference-entry": "Reference entries",
+        "preprint": "Preprints",
     }
     return st.multiselect(
         "Publication types to include",
@@ -1519,8 +1602,8 @@ def render_publication_type_selector(
         default=types,
         format_func=lambda value: labels.get(value, value.replace("-", " ").title()),
         help=(
-            "Choose one or more types. For DSpace, monographs and book chapters share "
-            "one Book API query and are separated using dc.type metadata."
+            "Choose one or more types. DSpace and OAI-PMH records are normalized "
+            "to the same publication types before filtering."
         ),
     )
 
@@ -1607,6 +1690,7 @@ def build_query_params(selection: QuerySelection) -> Dict[str, Any]:
         "sources": [
             *(["openalex"] if selection.include_openalex else []),
             *[source.id for source in selection.dspace_sources],
+            *[source.id for source in selection.oai_sources],
         ],
         "institutions": list(selection.institution_ids),
         "types": list(selection.publication_types),
@@ -1715,6 +1799,7 @@ def execute_publication_fetch(
     rows, stats = fetch_publications_with_sdg(
         include_openalex=selection.include_openalex,
         dspace_sources=selection.dspace_sources,
+        oai_sources=selection.oai_sources,
         institution_id=selection.institution_id,
         from_date=selection.from_date,
         work_type=selection.publication_types,
@@ -1973,6 +2058,7 @@ def render_result_charts(
     from_date: str,
     to_date: str,
     institution_id: Optional[str],
+    institution_ids: Sequence[str] = (),
 ) -> None:
     """Render every result visualization in its stable page order."""
     chart_data = aggregate_sdg_counts(chart_rows)
@@ -1984,7 +2070,13 @@ def render_result_charts(
     render_sdg_pie_chart(chart_data, f"SDGs in {chart_title}")
     st.write("")
     st.subheader("Co-affiliation network", divider="violet")
-    render_institution_network(chart_rows, from_date, to_date, institution_id)
+    render_institution_network(
+        all_rows,
+        from_date,
+        to_date,
+        institution_id,
+        selected_institution_ids=institution_ids,
+    )
     st.write("")
     st.subheader("OA distribution by author", divider="blue")
     render_author_oa_chart(all_rows, from_date, to_date)
@@ -2054,6 +2146,7 @@ def render_completed_result(
         from_date=selection.from_date,
         to_date=selection.to_date,
         institution_id=selection.institution_id,
+        institution_ids=selection.institution_ids,
     )
     render_export_downloads(all_rows, csv_bytes, filename)
 
@@ -2063,7 +2156,10 @@ def main() -> None:
     st.set_page_config(page_title="Aurora SDG Publication Classifier", layout="wide")
     st.title("Aurora SDG Publication Classifier")
     st.caption(
-        "Fetch and deduplicate publications from OpenAlex and configured DSpace repositories, relate them to the 17 UN Sustainable Development Goals (SDGs) using the [Aurora SDG classifier](https://aurora-universities.eu/sdg-research/classify/), and export the results."
+        "Fetch and deduplicate publications from OpenAlex, DSpace, and OAI-PMH "
+        "repositories, relate them to the 17 UN Sustainable Development Goals "
+        "(SDGs) using the [Aurora SDG classifier]"
+        "(https://aurora-universities.eu/sdg-research/classify/), and export the results."
     )
 
     user_agent, _ = resolve_user_agent()
@@ -2079,17 +2175,25 @@ def main() -> None:
         )
 
     configured_dspace_sources = resolve_dspace_sources()
+    configured_oai_sources = resolve_oai_sources()
     if any(
         not hasattr(source, "openalex_query_id")
-        for source in configured_dspace_sources
+        for source in [*configured_dspace_sources, *configured_oai_sources]
     ):
         st.error(
-            "The DSpace source model changed while Streamlit was running. "
+            "The repository source model changed while Streamlit was running. "
             "Stop the current process and restart it so all application modules are reloaded."
         )
         st.code("source .venv/bin/activate\nstreamlit run app.py", language="bash")
         return
-    include_openalex, selected_dspace_sources = render_source_selector(configured_dspace_sources)
+    include_openalex, selected_dspace_sources, selected_oai_sources = render_source_selector(
+        configured_dspace_sources,
+        configured_oai_sources,
+    )
+    selected_repository_sources: List[Union[DSpaceSource, OaiPmhSource]] = [
+        *selected_dspace_sources,
+        *selected_oai_sources,
+    ]
     openalex_institution_ids: List[str] = []
     using_configured_institutions = False
     institution_id: Optional[str] = None
@@ -2097,13 +2201,13 @@ def main() -> None:
     if include_openalex:
         configured_ids = [
             source.openalex_query_id
-            for source in selected_dspace_sources
+            for source in selected_repository_sources
             if source.openalex_query_id
         ]
         if configured_ids:
             using_configured_institutions = True
             openalex_institution_ids, include_lineage = render_configured_institution_selector(
-                selected_dspace_sources
+                selected_repository_sources
             )
             institution_id = openalex_institution_ids[0]
         else:
@@ -2116,6 +2220,7 @@ def main() -> None:
     publication_types = render_publication_type_selector(
         include_openalex,
         selected_dspace_sources,
+        selected_oai_sources,
     )
     st.write("")
     model = render_model_selector()
@@ -2129,7 +2234,7 @@ def main() -> None:
         default_from_date,
     )
 
-    if not include_openalex and not selected_dspace_sources:
+    if not include_openalex and not selected_repository_sources:
         st.info("Select at least one publication source to continue.")
         return
 
@@ -2161,6 +2266,7 @@ def main() -> None:
     selection = QuerySelection(
         include_openalex=include_openalex,
         dspace_sources=tuple(selected_dspace_sources),
+        oai_sources=tuple(selected_oai_sources),
         institution_id=institution_id,
         institution_ids=tuple(openalex_institution_ids),
         include_lineage=include_lineage,

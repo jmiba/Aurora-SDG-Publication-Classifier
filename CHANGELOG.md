@@ -5,6 +5,21 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Generic public OAI-PMH harvesting with Dublin Core normalization, safe XML
+  parsing, resumption-token pagination, local publication-date filtering, and
+  the Europa-Universität Viadrina OPUS repository registry entry.
+
+### Fixed
+
+- Co-affiliation networks now use the full combined result instead of a focused
+  preview row, retain edges for every selected repository institution instead
+  of filtering around only the first one, and report when records such as
+  OAI-PMH Dublin Core entries lack affiliation pairs.
+
 ## [1.0.0] - 2026-08-21
 
 ### Added

@@ -26,10 +26,12 @@ from cache_db import (
 )
 from publication_sources import (
     DSpaceSource,
+    OaiPmhSource,
     SourceFetchCancelled,
     WorkTypeSelection,
     deduplicate_publications,
     fetch_dspace_records,
+    fetch_oai_records,
     fetch_openalex_records,
 )
 from request_utils import request_with_backoff
@@ -46,6 +48,23 @@ ENRICHMENT_MAX_WORKERS = 8
 AURORA_MIN_INTERVAL_SECONDS = 0.12
 DEFAULT_FROM_DATE = "2023-01-01"
 DEFAULT_USER_AGENT = "Aurora-SDG-Publication-Classifier"
+OPENALEX_WORK_TYPES = (
+    "article",
+    "book",
+    "book-chapter",
+    "proceedings-article",
+    "proceedings",
+    "reference-entry",
+    "report",
+    "dissertation",
+    "dataset",
+    "software",
+    "review",
+    "editorial",
+    "letter",
+    "standard",
+    "other",
+)
 
 AURORA_MODELS = [
     ("aurora-sdg", "Aurora SDG mBERT (single-label, slower)"),
@@ -880,6 +899,7 @@ def fetch_publications_with_sdg(
     *,
     include_openalex: bool,
     dspace_sources: Sequence[DSpaceSource],
+    oai_sources: Sequence[OaiPmhSource] = (),
     institution_id: Optional[str],
     from_date: str,
     work_type: WorkTypeSelection,
@@ -926,7 +946,7 @@ def fetch_publications_with_sdg(
                     else list(work_type or [])
                 )
                 openalex_types = [
-                    value for value in selected_types if value != "artistic-work"
+                    value for value in selected_types if value in OPENALEX_WORK_TYPES
                 ]
                 if not selected_types or openalex_types:
                     stats.sources_queried.append("OpenAlex")
@@ -969,6 +989,21 @@ def fetch_publications_with_sdg(
                 records, _ = fetch_dspace_records(
                     session,
                     source,
+                    from_date=from_date,
+                    to_date=end_date,
+                    work_type=work_type,
+                    user_agent=user_agent,
+                    limit_rows=limit_rows,
+                    progress_callback=source_progress,
+                    cancel_check=cancel_check,
+                )
+                source_records.extend(records)
+
+            for oai_source in oai_sources:
+                stats.sources_queried.append(oai_source.label)
+                records, _ = fetch_oai_records(
+                    session,
+                    oai_source,
                     from_date=from_date,
                     to_date=end_date,
                     work_type=work_type,

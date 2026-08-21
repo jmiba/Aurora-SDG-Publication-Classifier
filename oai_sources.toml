@@ -1,0 +1,23 @@
+# Public OAI-PMH datasource registry. Add more [[oai_sources]] tables as needed.
+# Credentials do not belong in this tracked file.
+
+[[oai_sources]]
+id = "viadrina-opus"
+label = "Publication Server OPUS (Viadrina)"
+base_url = "https://opus4.kobv.de/opus4-euv/oai"
+metadata_prefix = "oai_dc"
+enabled = true
+openalex_institution_id = "https://openalex.org/I254029264"
+ror_id = "https://ror.org/02msan859"
+publication_types = [
+  "article",
+  "book",
+  "book-chapter",
+  "proceedings-article",
+  "report",
+  "dissertation",
+  "dataset",
+  "review",
+  "preprint",
+  "other",
+]

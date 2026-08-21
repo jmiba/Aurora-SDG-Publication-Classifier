@@ -126,6 +126,27 @@ class AppStateTests(unittest.TestCase):
             ],
         )
 
+    def test_network_edge_groups_keep_links_from_all_selected_origins(self) -> None:
+        primary, secondary = app_module._network_edge_groups_for_origins(
+            {
+                ("Origin A", "Partner A"): 5,
+                ("Origin B", "Partner B"): 4,
+                ("Partner A", "Partner B"): 3,
+                ("Partner B", "Outside"): 8,
+            },
+            {"Origin A", "Origin B"},
+            min_secondary_weight=2,
+        )
+
+        self.assertEqual(
+            primary,
+            {
+                ("Origin A", "Partner A"): 5,
+                ("Origin B", "Partner B"): 4,
+            },
+        )
+        self.assertEqual(secondary, [(('Partner A', 'Partner B'), 3)])
+
     def test_network_label_filter_matches_partial_comma_separated_names(self) -> None:
         labels = [
             "Primary University (DE)",
@@ -254,6 +275,34 @@ class AppStateTests(unittest.TestCase):
             "https://aurora.example/classify",
         )
 
+    def test_fetch_orchestration_passes_oai_sources(self) -> None:
+        source = app_module.OaiPmhSource(
+            id="example-oai",
+            label="Example OAI",
+            base_url="https://repo.example/oai",
+        )
+        selection = make_selection(oai_sources=(source,))
+        stats = FetchStats(
+            total_expected=0,
+            total_processed=0,
+            openalex_abstract_missing=0,
+            ss_abstract_retrieved=0,
+            gs_abstract_retrieved=0,
+        )
+        with patch.object(
+            app_module,
+            "fetch_publications_with_sdg",
+            return_value=([], stats),
+        ) as fetch:
+            app_module.execute_publication_fetch(
+                selection,
+                progress_callback=Mock(),
+                cancel_check=Mock(return_value=False),
+            )
+
+        self.assertEqual(fetch.call_args.kwargs["oai_sources"], (source,))
+        self.assertIn("example-oai", app_module.build_query_params(selection)["sources"])
+
     def test_fetch_summary_warns_once_when_semantic_scholar_rejects_key(self) -> None:
         stats = FetchStats(
             total_expected=2,
@@ -357,6 +406,24 @@ class AppStateTests(unittest.TestCase):
         )
         self.assertIn("Artistic works", app.multiselect[1].options)
         self.assertIn("Software", app.multiselect[1].options)
+
+    def test_selecting_viadrina_oai_source_uses_configured_institution(self) -> None:
+        app = AppTest.from_file("app.py").run(timeout=30)
+        app.multiselect[0].set_value(["openalex", "oai:viadrina-opus"])
+        app.run(timeout=30)
+
+        self.assertEqual(list(app.exception), [])
+        self.assertTrue(
+            any(
+                "https://openalex.org/I254029264" in caption.value
+                and "https://ror.org/02msan859" in caption.value
+                for caption in app.caption
+            )
+        )
+        self.assertFalse(
+            any("Search by institution" in widget.label for widget in app.text_input)
+        )
+        self.assertIn("Preprints", app.multiselect[1].options)
 
     def test_publication_type_selector_is_multichoice_and_expands_dspace_books(self) -> None:
         source = app_module.DSpaceSource(
@@ -530,6 +597,99 @@ class AppStateTests(unittest.TestCase):
         figure = plotly_chart.call_args.args[0]
         self.assertEqual(len(figure.data[:-1]), 3)
         self.assertIn("1 of 1", caption.call_args.args[0])
+
+    def test_institution_network_keeps_multiple_selected_origins(self) -> None:
+        rows = [
+            {
+                "publication_date": "2024-05-01",
+                "institution_affiliations_json": (
+                    '[{"id":"I1","name":"Origin A","country":"DE"},'
+                    '{"id":"I2","name":"Partner A","country":"PL"}]'
+                ),
+            },
+            {
+                "publication_date": "2024-05-02",
+                "institution_affiliations_json": (
+                    '[{"id":"I3","name":"Origin B","country":"FR"},'
+                    '{"id":"I4","name":"Partner B","country":"ES"}]'
+                ),
+            },
+        ]
+
+        with (
+            patch.object(app_module.st, "text_input", return_value=""),
+            patch.object(app_module.st, "plotly_chart") as plotly_chart,
+        ):
+            app_module.render_institution_network(
+                rows,
+                "2024-01-01",
+                "2024-12-31",
+                selected_institution_id="I1",
+                selected_institution_ids=("I1", "I3"),
+                theme_type="light",
+            )
+
+        figure = plotly_chart.call_args.args[0]
+        self.assertEqual(
+            {annotation.text for annotation in figure.layout.scene.annotations},
+            {"Origin A (DE)", "Partner A (PL)", "Origin B (FR)", "Partner B (ES)"},
+        )
+        self.assertEqual(len(figure.data[:-1]), 2)
+
+    def test_institution_network_explains_missing_affiliation_pairs(self) -> None:
+        rows = [
+            {
+                "publication_date": "2024-05-01",
+                "source": "viadrina-opus",
+                "institution_affiliations_json": "[]",
+            }
+        ]
+
+        with (
+            patch.object(app_module.st, "caption") as caption,
+            patch.object(app_module.st, "info") as info,
+        ):
+            app_module.render_institution_network(
+                rows,
+                "2024-01-01",
+                "2024-12-31",
+                selected_institution_id=None,
+            )
+
+        self.assertIn("0 of 1", caption.call_args.args[0])
+        self.assertIn("OAI-PMH Dublin Core", caption.call_args.args[0])
+        self.assertIn("two structured institution identifiers", info.call_args.args[0])
+
+    def test_result_charts_give_network_the_full_combined_result(self) -> None:
+        all_rows = [
+            {"title": "DSpace record", "source": "swps-share"},
+            {"title": "OAI record", "source": "viadrina-opus"},
+        ]
+        focused_rows = [all_rows[0]]
+
+        with (
+            patch.object(app_module, "render_sdg_pie_chart"),
+            patch.object(app_module, "render_institution_network") as network,
+            patch.object(app_module, "render_author_oa_chart"),
+            patch.object(app_module, "render_oa_ring_chart"),
+            patch.object(app_module, "render_oa_status_chart"),
+            patch.object(app_module, "render_publication_type_chart"),
+        ):
+            app_module.render_result_charts(
+                all_rows,
+                focused_rows,
+                "DSpace record",
+                from_date="2024-01-01",
+                to_date="2024-12-31",
+                institution_id="I1",
+                institution_ids=("I1", "I2"),
+            )
+
+        self.assertIs(network.call_args.args[0], all_rows)
+        self.assertEqual(
+            network.call_args.kwargs["selected_institution_ids"],
+            ("I1", "I2"),
+        )
 
     def test_network_label_filter_keeps_match_and_selected_origin(self) -> None:
         affiliations = (

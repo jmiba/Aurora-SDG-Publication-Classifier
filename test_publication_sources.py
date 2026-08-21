@@ -7,6 +7,7 @@ import sqlite3
 import tempfile
 import threading
 import unittest
+import xml.etree.ElementTree as ET
 from datetime import date
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -15,13 +16,17 @@ import cache_db
 import openalex_sdg
 from publication_sources import (
     DSpaceSource,
+    OaiPmhSource,
     _reconstruct_openalex_abstract,
     deduplicate_publications,
     end_of_month,
     fetch_dspace_records,
+    fetch_oai_records,
     normalize_dspace_object,
+    normalize_oai_record,
     normalize_openalex_work,
     parse_dspace_sources,
+    parse_oai_sources,
     reconcile_oa_pair,
 )
 
@@ -57,11 +62,57 @@ def metadata_entry(value: str) -> list:
     return [{"value": value}]
 
 
+def oai_record_xml(
+    *,
+    identifier: str,
+    datestamp: str,
+    metadata: str,
+    set_specs: tuple[str, ...] = (),
+    deleted: bool = False,
+) -> str:
+    status = ' status="deleted"' if deleted else ""
+    sets = "".join(f"<setSpec>{value}</setSpec>" for value in set_specs)
+    metadata_container = "" if deleted else f"<metadata>{metadata}</metadata>"
+    return (
+        f"<record><header{status}><identifier>{identifier}</identifier>"
+        f"<datestamp>{datestamp}</datestamp>{sets}</header>{metadata_container}</record>"
+    )
+
+
+def oai_response_xml(
+    records: list[str],
+    *,
+    token: str = "",
+    complete_list_size: int | None = None,
+) -> bytes:
+    size = (
+        f' completeListSize="{complete_list_size}"'
+        if complete_list_size is not None
+        else ""
+    )
+    token_xml = f"<resumptionToken{size}>{token}</resumptionToken>" if token or size else ""
+    return (
+        '<?xml version="1.0" encoding="utf-8"?>'
+        '<OAI-PMH xmlns="http://www.openarchives.org/OAI/2.0/">'
+        f"<ListRecords>{''.join(records)}{token_xml}</ListRecords>"
+        "</OAI-PMH>"
+    ).encode("utf-8")
+
+
+def oai_dc_xml(fields: str) -> str:
+    return (
+        '<oai_dc:dc xmlns:oai_dc="http://www.openarchives.org/OAI/2.0/oai_dc/" '
+        'xmlns:dc="http://purl.org/dc/elements/1.1/">'
+        f"{fields}</oai_dc:dc>"
+    )
+
+
 class FakeResponse:
-    def __init__(self, payload: dict, status_code: int = 200):
+    def __init__(self, payload, status_code: int = 200):
         self._payload = payload
         self.status_code = status_code
         self.headers = {}
+        self.content = payload if isinstance(payload, bytes) else b""
 
     def raise_for_status(self) -> None:
         if self.status_code >= 400:
@@ -135,6 +186,188 @@ class PublicationSourceTests(unittest.TestCase):
         self.assertIsNone(source.openalex_institution_id)
         self.assertIsNone(source.ror_id)
         self.assertIsNone(source.openalex_query_id)
+
+    def test_parse_generic_oai_sources(self) -> None:
+        sources = parse_oai_sources(
+            [
+                {
+                    "id": "viadrina-opus",
+                    "label": "Viadrina OPUS",
+                    "base_url": "https://opus.example/oai/",
+                    "metadata_prefix": "oai_dc",
+                    "set": "open_access",
+                    "publication_types": ["Article", "Book-Part"],
+                    "openalex_institution_id": "https://openalex.org/I254029264",
+                    "ror_id": "https://ror.org/02msan859",
+                },
+                {
+                    "id": "disabled",
+                    "base_url": "https://disabled.example/oai",
+                    "enabled": False,
+                },
+            ]
+        )
+
+        self.assertEqual(len(sources), 1)
+        self.assertEqual(sources[0].base_url, "https://opus.example/oai")
+        self.assertEqual(sources[0].set_spec, "open_access")
+        self.assertEqual(sources[0].publication_types, ("article", "book-part"))
+        self.assertEqual(sources[0].openalex_query_id, "https://openalex.org/I254029264")
+
+    def test_normalize_oai_dc_record(self) -> None:
+        source = OaiPmhSource(
+            id="viadrina-opus",
+            label="Viadrina OPUS",
+            base_url="https://opus.example/oai",
+        )
+        xml = oai_record_xml(
+            identifier="oai:kobv.de-opus4-euv:382",
+            datestamp="2026-02-19",
+            set_specs=("doc-type:Book", "open_access"),
+            metadata=oai_dc_xml(
+                """
+                <dc:title xml:lang="de">Was sind Polenstudien?</dc:title>
+                <dc:creator>Flade, Falk; https://orcid.org/0000-0002-6019-3604</dc:creator>
+                <dc:description xml:lang="de">Kurze deutsche Zusammenfassung.</dc:description>
+                <dc:description xml:lang="en">A richer English abstract for classification.</dc:description>
+                <dc:date>2017-12-15</dc:date>
+                <dc:type>book</dc:type>
+                <dc:identifier>https://opus.example/frontdoor/index/index/docId/382</dc:identifier>
+                <dc:identifier>https://doi.org/10.11584/IPS.5</dc:identifier>
+                <dc:identifier>https://opus.example/files/382/book.pdf</dc:identifier>
+                <dc:language>mul</dc:language>
+                <dc:rights>info:eu-repo/semantics/openAccess</dc:rights>
+                """
+            ),
+        )
+        root = ET.fromstring(oai_response_xml([xml]))
+        record = root.find(
+            ".//{http://www.openarchives.org/OAI/2.0/}record"
+        )
+        self.assertIsNotNone(record)
+
+        normalized = normalize_oai_record(record, source)  # type: ignore[arg-type]
+
+        self.assertEqual(normalized["source_record_id"], "oai:kobv.de-opus4-euv:382")
+        self.assertEqual(normalized["type"], "book")
+        self.assertEqual(normalized["doi"], "https://doi.org/10.11584/ips.5")
+        self.assertEqual(normalized["record_url"], "https://opus.example/frontdoor/index/index/docId/382")
+        self.assertEqual(normalized["authors"], "Flade, Falk")
+        self.assertEqual(normalized["abstract"], "A richer English abstract for classification.")
+        self.assertIs(normalized["is_oa"], True)
+
+    def test_oai_harvest_follows_tokens_and_filters_publication_metadata_locally(self) -> None:
+        source = OaiPmhSource(
+            id="example-oai",
+            label="Example OAI",
+            base_url="https://repo.example/oai",
+        )
+        article = oai_record_xml(
+            identifier="oai:example:article",
+            datestamp="2026-08-01",
+            set_specs=("doc-type:Article",),
+            metadata=oai_dc_xml(
+                "<dc:title>Current article</dc:title>"
+                "<dc:creator>Doe, Jane</dc:creator>"
+                "<dc:date>2024-05-10</dc:date>"
+                "<dc:type>article</dc:type>"
+            ),
+        )
+        deleted = oai_record_xml(
+            identifier="oai:example:deleted",
+            datestamp="2026-08-02",
+            metadata="",
+            deleted=True,
+        )
+        old_book = oai_record_xml(
+            identifier="oai:example:book",
+            datestamp="2026-08-03",
+            set_specs=("doc-type:Book",),
+            metadata=oai_dc_xml(
+                "<dc:title>Old book</dc:title>"
+                "<dc:date>2020</dc:date>"
+                "<dc:type>book</dc:type>"
+            ),
+        )
+        session = FakeSession(
+            [
+                oai_response_xml([article, deleted], token="next-page", complete_list_size=3),
+                oai_response_xml([old_book]),
+            ]
+        )
+
+        records, total = fetch_oai_records(
+            session,
+            source,
+            from_date="2024-01-01",
+            to_date="2024-12-31",
+            work_type=["article", "book"],
+            user_agent="test-agent",
+        )
+
+        self.assertEqual([record["title"] for record in records], ["Current article"])
+        self.assertEqual(total, 3)
+        self.assertEqual(
+            session.calls[0]["params"],
+            {"verb": "ListRecords", "metadataPrefix": "oai_dc"},
+        )
+        self.assertEqual(
+            session.calls[1]["params"],
+            {"verb": "ListRecords", "resumptionToken": "next-page"},
+        )
+
+    def test_oai_harvest_rejects_repeated_resumption_token(self) -> None:
+        source = OaiPmhSource(
+            id="looping-oai",
+            label="Looping OAI",
+            base_url="https://repo.example/oai",
+        )
+        session = FakeSession(
+            [
+                oai_response_xml([], token="same-token"),
+                oai_response_xml([], token="same-token"),
+            ]
+        )
+
+        with self.assertRaisesRegex(ValueError, "repeated an OAI-PMH resumption token"):
+            fetch_oai_records(
+                session,
+                source,
+                from_date="2024-01-01",
+                to_date="2024-12-31",
+                work_type=None,
+                user_agent="test-agent",
+            )
+
+    def test_oai_only_publication_type_is_not_sent_to_openalex(self) -> None:
+        source = OaiPmhSource(
+            id="example-oai",
+            label="Example OAI",
+            base_url="https://repo.example/oai",
+        )
+        with (
+            patch.object(openalex_sdg, "fetch_openalex_records") as fetch_openalex,
+            patch.object(
+                openalex_sdg,
+                "fetch_oai_records",
+                return_value=([], 0),
+            ) as fetch_oai,
+        ):
+            rows, _ = openalex_sdg.fetch_publications_with_sdg(
+                include_openalex=True,
+                dspace_sources=[],
+                oai_sources=[source],
+                institution_id="https://openalex.org/I254029264",
+                from_date="2024-01-01",
+                to_date="2024-12-31",
+                work_type=["preprint"],
+                model="skip",
+                user_agent="test-agent",
+            )
+
+        self.assertEqual(rows, [])
+        fetch_openalex.assert_not_called()
+        fetch_oai.assert_called_once()
 
     def test_normalize_article_without_exposing_artwork_or_thumbnail_media(self) -> None:
         record = dspace_search_object(
