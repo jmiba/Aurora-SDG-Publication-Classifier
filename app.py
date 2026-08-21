@@ -64,6 +64,7 @@ PREVIEW_COLUMNS = [
 PREVIEW_PAGE_SIZE = 25
 SPHERE_LATITUDE_STEPS = 16
 SPHERE_LONGITUDE_STEPS = 32
+MAX_SECONDARY_NETWORK_EDGES = 20
 CSV_FIELDNAMES = [
     "publication_key",
     "source",
@@ -557,6 +558,61 @@ def _build_sphere_mesh(
     return geometry
 
 
+def _network_edge_groups(
+    edge_counts: Mapping[Tuple[str, str], int],
+    selected_label: str,
+    min_secondary_weight: int,
+) -> Tuple[Dict[Tuple[str, str], int], List[Tuple[Tuple[str, str], int]]]:
+    """Split origin links from ranked links between the origin's partners."""
+    primary_edges = {
+        edge: weight for edge, weight in edge_counts.items() if selected_label in edge
+    }
+    neighbors: Set[str] = set()
+    for a, b in primary_edges:
+        neighbors.update((a, b))
+    neighbors.discard(selected_label)
+    secondary_edges = sorted(
+        (
+            (edge, weight)
+            for edge, weight in edge_counts.items()
+            if edge[0] in neighbors
+            and edge[1] in neighbors
+            and weight >= min_secondary_weight
+        ),
+        key=lambda item: (-item[1], item[0]),
+    )
+    return primary_edges, secondary_edges
+
+
+def _network_labels_matching_query(
+    labels: Sequence[str], query: str
+) -> Set[str]:
+    """Return labels matching any comma-separated, case-insensitive substring."""
+    terms = [term.strip().casefold() for term in query.split(",") if term.strip()]
+    if not terms:
+        return set(labels)
+    return {
+        label
+        for label in labels
+        if any(term in label.casefold() for term in terms)
+    }
+
+
+def _network_label_style(theme_type: str) -> Dict[str, Any]:
+    """Return an accessible annotation palette for the active Streamlit theme."""
+    if str(theme_type).casefold() == "dark":
+        return {
+            "font_color": "#f8fafc",
+            "background_color": "rgba(15,23,42,0.88)",
+            "border_color": "rgba(196,181,253,0.65)",
+        }
+    return {
+        "font_color": "#111827",
+        "background_color": "rgba(255,255,255,0.90)",
+        "border_color": "rgba(77,31,227,0.55)",
+    }
+
+
 def render_institution_network(
     rows: List[Dict[str, Any]],
     start_date: str,
@@ -564,6 +620,8 @@ def render_institution_network(
     selected_institution_id: Optional[str],
     max_nodes: int = 30,
     min_second_level_weight: int = 2,
+    max_secondary_edges: int = MAX_SECONDARY_NETWORK_EDGES,
+    theme_type: Optional[str] = None,
 ) -> None:
     """Render a simple 3D co-affiliation network of institutions from the selected period."""
     if not rows:
@@ -665,37 +723,96 @@ def render_institution_network(
             selected_institution_id.strip().split("/")[-1]
         )
     if selected_label:
-        primary_edges = {
-            edge: weight
-            for edge, weight in label_edge_counts.items()
-            if selected_label in edge
-        }
-        neighbors: Set[str] = set()
-        for (a, b) in primary_edges.keys():
-            neighbors.update([a, b])
-        neighbors.discard(selected_label)
-        secondary_edges = {
-            edge: weight
-            for edge, weight in label_edge_counts.items()
-            if edge[0] in neighbors and edge[1] in neighbors and weight >= min_second_level_weight
-        }
-        combined = {**primary_edges, **secondary_edges}
-        if combined:
-            label_edge_counts = combined
+        primary_edges, secondary_edges = _network_edge_groups(
+            label_edge_counts,
+            selected_label,
+            min_second_level_weight,
+        )
+        if primary_edges:
+            show_secondary_edges = False
+            if secondary_edges:
+                show_secondary_edges = st.toggle(
+                    "Show connections between partner institutions",
+                    value=False,
+                    key="show_secondary_coaffiliations",
+                    help=(
+                        "Primary edges connect the selected institution to its "
+                        "partners. Enable this to add the strongest links between "
+                        "those partner institutions."
+                    ),
+                )
+            visible_secondary_edges = (
+                secondary_edges[: max(0, max_secondary_edges)]
+                if show_secondary_edges
+                else []
+            )
+            label_edge_counts = {
+                **primary_edges,
+                **dict(visible_secondary_edges),
+            }
+            if show_secondary_edges:
+                st.caption(
+                    "Showing "
+                    f"{len(visible_secondary_edges):,} of "
+                    f"{len(secondary_edges):,} eligible partner-to-partner "
+                    "connections, ranked by co-authored works."
+                )
 
     degree: Dict[str, int] = {}
     for (a, b), w in label_edge_counts.items():
         degree[a] = degree.get(a, 0) + w
         degree[b] = degree.get(b, 0) + w
 
-    # Limit to top nodes by degree, but ensure the selected node stays if present.
-    top_nodes = set(sorted(degree, key=lambda node: degree[node], reverse=True)[:max_nodes])
+    node_filter = st.text_input(
+        "Filter nodes by label",
+        key="network_node_label_filter",
+        placeholder="e.g. Warsaw, Berlin or University A, University B",
+        help=(
+            "Enter one or more comma-separated name fragments. Matching is "
+            "case-insensitive and happens before the top-node limit is applied."
+        ),
+    )
+    candidate_nodes = _network_labels_matching_query(list(degree), node_filter)
+    if node_filter.strip() and selected_label and selected_label in degree:
+        candidate_nodes.add(selected_label)
+
+    # Limit to top nodes by degree after label filtering, but keep the selected node.
+    top_nodes = set(
+        sorted(
+            candidate_nodes,
+            key=lambda node: degree[node],
+            reverse=True,
+        )[:max_nodes]
+    )
     if selected_label and selected_label in degree:
         top_nodes.add(selected_label)
-    filtered_edges = {(a, b): w for (a, b), w in label_edge_counts.items() if a in top_nodes and b in top_nodes}
+    filtered_edges = {
+        (a, b): w
+        for (a, b), w in label_edge_counts.items()
+        if a in top_nodes and b in top_nodes
+    }
+    filter_status_message: Optional[str] = None
     if not filtered_edges:
-        st.info("Co-affiliations exist but were filtered out by the top-n limit.")
-        return
+        if node_filter.strip():
+            filter_status_message = (
+                "No connected institution labels match this filter. "
+                "Try a different or broader name fragment."
+            )
+            top_nodes = (
+                {selected_label}
+                if selected_label and selected_label in degree
+                else set()
+            )
+        else:
+            st.info("Co-affiliations exist but were filtered out by the top-n limit.")
+            return
+    if node_filter.strip() and filtered_edges:
+        visible_partner_count = len(top_nodes - ({selected_label} if selected_label else set()))
+        st.caption(
+            f"Label filter retained {visible_partner_count:,} matching institution"
+            f"{'s' if visible_partner_count != 1 else ''}"
+            + (" plus the selected origin." if selected_label else ".")
+        )
 
     # Layout: keep selected at center (if present), scatter others randomly.
 
@@ -732,7 +849,7 @@ def render_institution_network(
         for node, coords in pos.items()
     }
 
-    max_deg = max(degree.get(node, 1) for node in top_nodes)
+    max_deg = max((degree.get(node, 1) for node in top_nodes), default=1)
     desired_node_radii = {
         node: 0.03 + (degree.get(node, 1) / max_deg) * 0.075
         for node in top_nodes
@@ -786,55 +903,88 @@ def render_institution_network(
             )
         )
 
-    sphere_geometry = _build_sphere_mesh(node_positions, node_radii, degree)
-    sphere_trace = go.Mesh3d(
-        x=sphere_geometry.x,
-        y=sphere_geometry.y,
-        z=sphere_geometry.z,
-        i=sphere_geometry.i,
-        j=sphere_geometry.j,
-        k=sphere_geometry.k,
-        intensity=sphere_geometry.intensity,
-        intensitymode="vertex",
-        colorscale=[[0, "#b4a4e8"], [1, "#4d1fe3"]],
-        cmin=0,
-        cmax=max_deg,
-        showscale=True,
-        colorbar=dict(title="Degree"),
-        opacity=1.0,
-        flatshading=False,
-        lighting=dict(
-            ambient=0.55,
-            diffuse=0.9,
-            specular=0.35,
-            roughness=0.55,
-            fresnel=0.15,
-        ),
-        lightposition=dict(x=100, y=200, z=300),
-        hovertext=sphere_geometry.hover_text,
-        hoverinfo="text",
-        name="Institutions",
-    )
-    label_nodes = sorted(top_nodes)
-    label_trace = go.Scatter3d(
-        x=[node_positions[node][0] for node in label_nodes],
-        y=[node_positions[node][1] for node in label_nodes],
-        z=[node_positions[node][2] + node_radii[node] for node in label_nodes],
-        mode="text",
-        text=label_nodes,
-        textposition="top center",
-        textfont=dict(size=14, color="#000000"),
-        hoverinfo="skip",
-        name="Institution labels",
-    )
-    fig = go.Figure(data=[*edge_traces, sphere_trace, label_trace])
+    figure_data = list(edge_traces)
+    if top_nodes:
+        sphere_geometry = _build_sphere_mesh(node_positions, node_radii, degree)
+        figure_data.append(
+            go.Mesh3d(
+                x=sphere_geometry.x,
+                y=sphere_geometry.y,
+                z=sphere_geometry.z,
+                i=sphere_geometry.i,
+                j=sphere_geometry.j,
+                k=sphere_geometry.k,
+                intensity=sphere_geometry.intensity,
+                intensitymode="vertex",
+                colorscale=[[0, "#b4a4e8"], [1, "#4d1fe3"]],
+                cmin=0,
+                cmax=max_deg,
+                showscale=True,
+                colorbar=dict(title="Degree"),
+                opacity=1.0,
+                flatshading=False,
+                lighting=dict(
+                    ambient=0.55,
+                    diffuse=0.9,
+                    specular=0.35,
+                    roughness=0.55,
+                    fresnel=0.15,
+                ),
+                lightposition=dict(x=100, y=200, z=300),
+                hovertext=sphere_geometry.hover_text,
+                hoverinfo="text",
+                name="Institutions",
+            )
+        )
+    active_theme_type = theme_type or st.context.theme.type or "light"
+    label_style = _network_label_style(active_theme_type)
+    node_annotations = [
+        dict(
+            x=node_positions[node][0],
+            y=node_positions[node][1],
+            z=node_positions[node][2],
+            text=node,
+            showarrow=False,
+            xanchor="center",
+            yanchor="bottom",
+            yshift=8,
+            font=dict(size=14, color=label_style["font_color"], weight=300),
+            bgcolor=label_style["background_color"],
+            bordercolor=label_style["border_color"],
+            borderwidth=1,
+            borderpad=3,
+        )
+        for node in sorted(top_nodes)
+    ]
+    fig = go.Figure(data=figure_data)
     fig.update_layout(
         showlegend=False,
+        uirevision="institution-network",
         margin=dict(l=0, r=0, t=0, b=0),
-        scene=dict(xaxis=dict(visible=False), yaxis=dict(visible=False), zaxis=dict(visible=False)),
+        scene=dict(
+            uirevision="institution-network",
+            xaxis=dict(visible=False),
+            yaxis=dict(visible=False),
+            zaxis=dict(visible=False),
+            annotations=node_annotations,
+        ),
+        height=650,
     )
-    fig.update_layout(height=650)
-    st.plotly_chart(fig, width="stretch")
+    if filter_status_message:
+        fig.add_annotation(
+            x=0.5,
+            y=0.06,
+            xref="paper",
+            yref="paper",
+            text=filter_status_message,
+            showarrow=False,
+            font=dict(size=13, color=label_style["font_color"]),
+            bgcolor=label_style["background_color"],
+            bordercolor=label_style["border_color"],
+            borderwidth=1,
+            borderpad=4,
+        )
+    st.plotly_chart(fig, width="stretch", key="institution_network_chart")
 
 def render_author_oa_chart(
     rows: List[Dict[str, Any]], start_date: str, end_date: str, max_authors: int = 20

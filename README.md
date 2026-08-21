@@ -13,6 +13,7 @@ This Streamlit app explores publications from OpenAlex and any number of configu
 - **Enrich abstracts**: If all selected source records lack an abstract, the app can fall back to Semantic Scholar and Google Scholar.
 - **Inspect results instantly**: The “Preview” section shows 25 rows per page. You can select a single row to drive the SDG chart.
 - **Visualize SDG coverage**: A donut chart aggregates SDG scores across all rows or a single selected publication.
+- **Explore co-affiliations**: Filter network nodes by case-insensitive label fragments, keep the selected institution as context, and optionally reveal the strongest partner-to-partner connections.
 - **Export data**: Download either a CSV or Excel file for the entire result set.
 - **Keep media out of the pipeline**: DSpace thumbnails, artwork images, bundles, bitstreams, and metrics are neither requested nor embedded.
 

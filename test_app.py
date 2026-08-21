@@ -96,6 +96,61 @@ class AppStateTests(unittest.TestCase):
         self.assertGreaterEqual(app_module.SPHERE_LATITUDE_STEPS, 16)
         self.assertGreaterEqual(app_module.SPHERE_LONGITUDE_STEPS, 32)
 
+    def test_network_edge_groups_rank_only_partner_connections(self) -> None:
+        primary, secondary = app_module._network_edge_groups(
+            {
+                ("Origin", "Partner A"): 10,
+                ("Origin", "Partner B"): 8,
+                ("Origin", "Partner C"): 6,
+                ("Partner A", "Partner B"): 3,
+                ("Partner A", "Partner C"): 5,
+                ("Partner B", "Outside"): 20,
+            },
+            "Origin",
+            min_secondary_weight=2,
+        )
+
+        self.assertEqual(
+            primary,
+            {
+                ("Origin", "Partner A"): 10,
+                ("Origin", "Partner B"): 8,
+                ("Origin", "Partner C"): 6,
+            },
+        )
+        self.assertEqual(
+            secondary,
+            [
+                (("Partner A", "Partner C"), 5),
+                (("Partner A", "Partner B"), 3),
+            ],
+        )
+
+    def test_network_label_filter_matches_partial_comma_separated_names(self) -> None:
+        labels = [
+            "Primary University (DE)",
+            "University of Warsaw (PL)",
+            "Paris Research Institute (FR)",
+        ]
+
+        self.assertEqual(
+            app_module._network_labels_matching_query(labels, "warsaw, PARIS"),
+            {"University of Warsaw (PL)", "Paris Research Institute (FR)"},
+        )
+        self.assertEqual(
+            app_module._network_labels_matching_query(labels, ""),
+            set(labels),
+        )
+
+    def test_network_label_style_adapts_to_light_and_dark_modes(self) -> None:
+        light = app_module._network_label_style("light")
+        dark = app_module._network_label_style("dark")
+
+        self.assertEqual(light["font_color"], "#111827")
+        self.assertIn("255,255,255", light["background_color"])
+        self.assertEqual(dark["font_color"], "#f8fafc")
+        self.assertIn("15,23,42", dark["background_color"])
+
     def test_model_selector_uses_selected_index_when_descriptions_collide(self) -> None:
         models = [("first", "Same description"), ("second", "Same description")]
         with (
@@ -376,23 +431,38 @@ class AppStateTests(unittest.TestCase):
             }
         ]
 
-        with patch.object(app_module.st, "plotly_chart") as plotly_chart:
+        with (
+            patch.object(app_module.st, "text_input", return_value=""),
+            patch.object(app_module.st, "plotly_chart") as plotly_chart,
+        ):
             app_module.render_institution_network(
                 rows,
                 "2024-01-01",
                 "2024-12-31",
                 selected_institution_id="I1",
+                theme_type="light",
             )
 
         figure = plotly_chart.call_args.args[0]
-        edge_traces = figure.data[:-2]
-        sphere_trace = figure.data[-2]
-        label_trace = figure.data[-1]
+        edge_traces = figure.data[:-1]
+        sphere_trace = figure.data[-1]
         self.assertEqual(sphere_trace.type, "mesh3d")
         self.assertEqual(sphere_trace.opacity, 1.0)
         self.assertFalse(sphere_trace.flatshading)
-        self.assertEqual(label_trace.mode, "text")
-        self.assertEqual(label_trace.textfont.color, "#000000")
+        annotations = list(figure.layout.scene.annotations)
+        primary_annotation = next(
+            annotation
+            for annotation in annotations
+            if annotation.text == "Primary University (DE)"
+        )
+        self.assertEqual(primary_annotation.font.color, "#111827")
+        self.assertEqual(primary_annotation.font.weight, 300)
+        self.assertEqual(primary_annotation.bgcolor, "rgba(255,255,255,0.90)")
+        self.assertEqual(primary_annotation.bordercolor, "rgba(77,31,227,0.55)")
+        self.assertFalse(primary_annotation.showarrow)
+        self.assertEqual(primary_annotation.x, 0.0)
+        self.assertEqual(primary_annotation.y, 0.0)
+        self.assertEqual(primary_annotation.z, 0.0)
         self.assertTrue(all(trace.mode == "lines" for trace in edge_traces))
         single_edge = figure.data[0]
         self.assertEqual(single_edge.line.width, 4.0)
@@ -409,6 +479,136 @@ class AppStateTests(unittest.TestCase):
                 trace.hoverlabel.font.color == "#000000"
                 for trace in edge_traces
             )
+        )
+
+    def test_secondary_network_edges_are_hidden_by_default(self) -> None:
+        affiliations = (
+            '[{"id":"I1","name":"Primary University","country":"DE"},'
+            '{"id":"I2","name":"Partner A","country":"PL"},'
+            '{"id":"I3","name":"Partner B","country":"FR"}]'
+        )
+        rows = [
+            {
+                "publication_date": f"2024-05-0{day}",
+                "institution_affiliations_json": affiliations,
+            }
+            for day in (1, 2)
+        ]
+
+        with (
+            patch.object(app_module.st, "toggle", return_value=False) as toggle,
+            patch.object(app_module.st, "text_input", return_value=""),
+            patch.object(app_module.st, "plotly_chart") as plotly_chart,
+        ):
+            app_module.render_institution_network(
+                rows,
+                "2024-01-01",
+                "2024-12-31",
+                selected_institution_id="I1",
+                theme_type="light",
+            )
+
+        toggle.assert_called_once()
+        figure = plotly_chart.call_args.args[0]
+        self.assertEqual(len(figure.data[:-1]), 2)
+
+        with (
+            patch.object(app_module.st, "toggle", return_value=True),
+            patch.object(app_module.st, "text_input", return_value=""),
+            patch.object(app_module.st, "caption") as caption,
+            patch.object(app_module.st, "plotly_chart") as plotly_chart,
+        ):
+            app_module.render_institution_network(
+                rows,
+                "2024-01-01",
+                "2024-12-31",
+                selected_institution_id="I1",
+                theme_type="light",
+            )
+
+        figure = plotly_chart.call_args.args[0]
+        self.assertEqual(len(figure.data[:-1]), 3)
+        self.assertIn("1 of 1", caption.call_args.args[0])
+
+    def test_network_label_filter_keeps_match_and_selected_origin(self) -> None:
+        affiliations = (
+            '[{"id":"I1","name":"Primary University","country":"DE"},'
+            '{"id":"I2","name":"Partner Alpha","country":"PL"},'
+            '{"id":"I3","name":"Partner Beta","country":"FR"}]'
+        )
+        rows = [
+            {
+                "publication_date": "2024-05-01",
+                "institution_affiliations_json": affiliations,
+            }
+        ]
+
+        with (
+            patch.object(app_module.st, "text_input", return_value="alpha"),
+            patch.object(app_module.st, "caption"),
+            patch.object(app_module.st, "plotly_chart") as plotly_chart,
+        ):
+            app_module.render_institution_network(
+                rows,
+                "2024-01-01",
+                "2024-12-31",
+                selected_institution_id="I1",
+                theme_type="light",
+            )
+
+        figure = plotly_chart.call_args.args[0]
+        visible_labels = {
+            annotation.text for annotation in figure.layout.scene.annotations
+        }
+        self.assertEqual(
+            visible_labels,
+            {"Primary University (DE)", "Partner Alpha (PL)"},
+        )
+        self.assertEqual(len(figure.data[:-1]), 1)
+
+    def test_network_label_filter_keeps_canvas_when_nothing_matches(self) -> None:
+        rows = [
+            {
+                "publication_date": "2024-05-01",
+                "institution_affiliations_json": (
+                    '[{"id":"I1","name":"Primary University","country":"DE"},'
+                    '{"id":"I2","name":"Partner University","country":"PL"}]'
+                ),
+            }
+        ]
+
+        with (
+            patch.object(app_module.st, "text_input", return_value="no match"),
+            patch.object(app_module.st, "plotly_chart") as plotly_chart,
+        ):
+            app_module.render_institution_network(
+                rows,
+                "2024-01-01",
+                "2024-12-31",
+                selected_institution_id="I1",
+                theme_type="light",
+            )
+
+        plotly_chart.assert_called_once()
+        figure = plotly_chart.call_args.args[0]
+        self.assertEqual(figure.layout.height, 650)
+        self.assertEqual(figure.layout.uirevision, "institution-network")
+        self.assertEqual(figure.layout.scene.uirevision, "institution-network")
+        self.assertEqual(len(figure.data), 1)
+        self.assertEqual(figure.data[0].type, "mesh3d")
+        self.assertEqual(
+            {annotation.text for annotation in figure.layout.scene.annotations},
+            {"Primary University (DE)"},
+        )
+        self.assertTrue(
+            any(
+                "No connected institution labels match" in annotation.text
+                for annotation in figure.layout.annotations
+            )
+        )
+        self.assertEqual(
+            plotly_chart.call_args.kwargs["key"],
+            "institution_network_chart",
         )
 
     def test_result_payload_requires_current_schema_and_matching_params(self) -> None:
