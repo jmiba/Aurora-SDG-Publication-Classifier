@@ -16,6 +16,8 @@ from urllib.parse import urlparse
 
 import requests
 
+from request_utils import request_with_backoff
+
 
 OPENALEX_WORKS_URL = "https://api.openalex.org/works"
 OPENALEX_PER_PAGE = 200
@@ -415,27 +417,19 @@ def _request_json(
     headers: Mapping[str, str],
     retries: int = 3,
 ) -> Dict[str, Any]:
-    for attempt in range(1, retries + 1):
-        try:
-            response = session.get(url, params=params, headers=headers, timeout=(10, 60))
-            if response.status_code in {429, 500, 502, 503, 504} and attempt < retries:
-                retry_after = response.headers.get("Retry-After")
-                try:
-                    delay = float(retry_after) if retry_after else 0.5 * attempt
-                except ValueError:
-                    delay = 0.5 * attempt
-                time.sleep(min(max(delay, 0.0), 10.0))
-                continue
-            response.raise_for_status()
-            data = response.json()
-            if not isinstance(data, dict):
-                raise ValueError(f"Expected JSON object from {url}")
-            return data
-        except requests.RequestException:
-            if attempt >= retries:
-                raise
-            time.sleep(0.5 * attempt)
-    return {}
+    response = request_with_backoff(
+        session,
+        "get",
+        url,
+        params=params,
+        headers=headers,
+        timeout=(10, 60),
+        retries=retries,
+    )
+    data = response.json()
+    if not isinstance(data, dict):
+        raise ValueError(f"Expected JSON object from {url}")
+    return data
 
 
 def fetch_openalex_records(

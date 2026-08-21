@@ -37,6 +37,7 @@ from publication_sources import (
     fetch_dspace_records,
     fetch_openalex_records,
 )
+from request_utils import request_with_backoff
 
 # ------------------ CONFIG ------------------
 BASE_WORKS = "https://api.openalex.org/works"
@@ -164,22 +165,22 @@ def fetch_institution_lineage(
     inst_token = _normalize_institution_id(institution_id)
     url = f"{BASE_INSTITUTIONS}/{inst_token}"
     headers = {"User-Agent": user_agent}
-    for attempt in range(1, retries + 1):
-        try:
-            resp = requests.get(url, headers=headers, timeout=20)
-            if resp.status_code == 429:
-                time.sleep(pause * attempt)
-                continue
-            resp.raise_for_status()
-            data = resp.json()
-            lineage = data.get("lineage") or []
-            if isinstance(lineage, list):
-                return [str(_normalize_institution_id(item)) for item in lineage if item]
-            return []
-        except requests.RequestException:
-            if attempt == retries:
-                return []
-            time.sleep(pause * attempt)
+    try:
+        resp = request_with_backoff(
+            requests,
+            "get",
+            url,
+            headers=headers,
+            timeout=20,
+            retries=retries,
+            base=pause,
+        )
+        data = resp.json()
+        lineage = data.get("lineage") or []
+        if isinstance(lineage, list):
+            return [str(_normalize_institution_id(item)) for item in lineage if item]
+    except requests.RequestException:
+        pass
     return []
 
 def flatten_authors_and_institutions(authorships: Sequence[dict]) -> Tuple[str, str, List[dict]]:
@@ -330,40 +331,38 @@ def get_abstract_from_serpapi_google_scholar(
         "num": 5, # Number of results, usually enough to find the paper
     }
 
-    for attempt in range(1, retries + 1):
-        try:
-            resp = session.get(SERPAPI_GS_API, params=params, timeout=20)
-            if resp.status_code == 429: # Rate limit
-                time.sleep(pause * attempt)
+    try:
+        resp = request_with_backoff(
+            session,
+            "get",
+            SERPAPI_GS_API,
+            params=params,
+            timeout=20,
+            retries=retries,
+            base=pause,
+        )
+        data = resp.json()
+        expected_doi = _normalize_doi(doi)
+        expected_year = _publication_year(publication_year)
+
+        for result in data.get("organic_results", []):
+            result_title = result.get("title")
+            if not result_title or not _title_matches(title, result_title):
                 continue
-            resp.raise_for_status()
-            data = resp.json()
-            expected_doi = _normalize_doi(doi)
-            expected_year = _publication_year(publication_year)
+            result_doi = _serpapi_result_doi(result)
+            if result_doi and result_doi != expected_doi:
+                continue
+            result_year = _serpapi_result_year(result)
+            if result_year and result_year != expected_year:
+                continue
+            abstract = result.get("snippet")
+            if abstract:
+                logging.info("SerpApi Google Scholar abstract retrieved for '%s'", title)
+                return clean_html_fragment(abstract)
 
-            for result in data.get("organic_results", []):
-                result_title = result.get("title")
-                if not result_title or not _title_matches(title, result_title):
-                    continue
-                result_doi = _serpapi_result_doi(result)
-                if result_doi and result_doi != expected_doi:
-                    continue
-                result_year = _serpapi_result_year(result)
-                if result_year and result_year != expected_year:
-                    continue
-                abstract = result.get("snippet")
-                if abstract:
-                    logging.info("SerpApi Google Scholar abstract retrieved for '%s'", title)
-                    return clean_html_fragment(abstract)
-
-            logging.info("Serpapi Google Scholar abstract not found for '%s' (no matching results with snippets)", title)
-            return None
-
-        except requests.RequestException as exc:
-            logging.warning(f"Serpapi call failed for '{title}' (attempt {attempt}): {exc}")
-            if attempt == retries:
-                return None
-            time.sleep(pause * attempt)
+        logging.info("Serpapi Google Scholar abstract not found for '%s' (no matching results with snippets)", title)
+    except requests.RequestException as exc:
+        logging.warning("Serpapi call failed for '%s': %s", title, exc)
     return None
 
 def get_abstract_from_scholarly(
@@ -497,27 +496,25 @@ def classify_text_aurora(
         "Content-Type": "application/json; charset=utf-8",
     }
     payload = {"text": text}
-    for attempt in range(1, retries + 1):
-        try:
-            if request_limiter:
-                request_limiter.wait()
-            resp = session.post(
-                url, headers=headers, data=json.dumps(payload), timeout=60
-            )
-            if resp.status_code == 429:
-                time.sleep(pause * attempt + 0.5)
-                continue
-            resp.raise_for_status()
-            data = resp.json()
-            if not data:
-                return None, "empty json"
-            return data, ""
-        except requests.RequestException as exc:
-            if attempt == retries:
-                code = getattr(getattr(exc, "response", None), "status_code", None)
-                return None, f"http_error:{code}"
-            time.sleep(pause * attempt)
-    return None, "unknown"
+    try:
+        resp = request_with_backoff(
+            session,
+            "post",
+            url,
+            headers=headers,
+            data=json.dumps(payload),
+            timeout=60,
+            retries=retries,
+            base=pause,
+            _before_request=request_limiter.wait if request_limiter else None,
+        )
+        data = resp.json()
+        if not data:
+            return None, "empty json"
+        return data, ""
+    except requests.RequestException as exc:
+        code = getattr(getattr(exc, "response", None), "status_code", None)
+        return None, f"http_error:{code}"
 
 def get_abstract_from_semantic_scholar(
     doi: str,
@@ -537,21 +534,20 @@ def get_abstract_from_semantic_scholar(
     headers = {"Accept": "application/json"}
     if api_key:
         headers["x-api-key"] = api_key
-    requester = session or requests
-    for attempt in range(1, retries + 1):
-        try:
-            resp = requester.get(url, headers=headers, timeout=20)
-            if resp.status_code == 429:
-                time.sleep(pause * attempt)
-                continue
-            resp.raise_for_status()
-            data = resp.json()
-            return data.get("abstract")
-        except requests.RequestException:
-            if attempt == retries:
-                return None
-            time.sleep(pause * attempt)
-    return None
+    try:
+        resp = request_with_backoff(
+            session or requests,
+            "get",
+            url,
+            headers=headers,
+            timeout=20,
+            retries=retries,
+            base=pause,
+        )
+        data = resp.json()
+        return data.get("abstract")
+    except requests.RequestException:
+        return None
 
 def format_sdg_predictions(sdg_json: Optional[Any]) -> str:
     """
