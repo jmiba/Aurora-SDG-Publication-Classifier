@@ -45,7 +45,11 @@ def main() -> int:
     try:
         from scholarly import ProxyGenerator, scholarly  # type: ignore
     except Exception as exc:  # pragma: no cover - import only used manually
-        logging.error("Unable to import scholarly: %s", exc)
+        logging.error(
+            "Unable to import scholarly: %s. Install the optional profile with "
+            "`pip install -r requirements-scholarly.txt`.",
+            exc,
+        )
         return 1
 
     pg = ProxyGenerator()

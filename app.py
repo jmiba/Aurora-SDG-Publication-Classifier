@@ -29,6 +29,7 @@ from openalex_sdg import (
     is_openalex_institution_id,
     sanitize_filename,
     search_institutions_by_name,
+    scholarly_fallback_available,
 )
 from publication_sources import DSpaceSource, end_of_month, parse_dspace_sources
 
@@ -214,6 +215,29 @@ def resolve_google_scholar_enabled() -> bool:
     if value is None:
         return False
     return value
+
+
+def render_google_scholar_status(enabled: bool, serpapi_api_key: Optional[str]) -> None:
+    """Describe the active Google Scholar lookup path."""
+    if not enabled:
+        return
+    if serpapi_api_key:
+        st.info(
+            "Google Scholar abstract lookups enabled (via SerpApi).",
+            icon=":material/check_circle:",
+        )
+    elif scholarly_fallback_available():
+        st.warning(
+            "Google Scholar abstract lookups enabled, but `serpapi_api_key` is not "
+            "set. Using the optional scholarly free-proxy fallback (less reliable "
+            "and slower)."
+        )
+    else:
+        st.warning(
+            "Google Scholar abstract lookups enabled, but neither `serpapi_api_key` "
+            "nor the optional scholarly fallback is available. Lookups will be "
+            "skipped; install `requirements-scholarly.txt` to enable the fallback."
+        )
 
 def resolve_serpapi_key() -> Optional[str]:
     """Read the SerpApi API key (if supplied)."""
@@ -574,7 +598,7 @@ def render_institution_network(
         x0, y0, z0 = node_positions[a]
         x1, y1, z1 = node_positions[b]
         width = max(1.0, min(10.0, w * 2.0))
-        alpha = min(0.75, 0.5 + 0.15 * (w - 1))
+        alpha = min(0.85, 0.4 + 0.15 * (w - 1))
         mid_x = (x0 + x1) / 2
         mid_y = (y0 + y1) / 2
         mid_z = (z0 + z1) / 2
@@ -1459,14 +1483,7 @@ def main():
     st.write("")
     st.divider()
     st.header("Run query and preview results", divider="rainbow")
-    if google_scholar_enabled:
-        if serpapi_api_key:
-            st.info("Google Scholar abstract lookups enabled (via SerpApi).", icon=":material/check_circle:")
-        else:
-            st.warning(
-                "Google Scholar abstract lookups enabled, but `serpapi_api_key` not set. "
-                "Will fall back to scholarly with free proxies (less reliable and slower)."
-            )
+    render_google_scholar_status(google_scholar_enabled, serpapi_api_key)
 
     current_params = {
         "sources": [

@@ -48,7 +48,7 @@ flowchart TB
     F -->|Missing| G{Google Scholar enabled?}
     I -.->|Missing| H[Use title for SDG classification]
     G -->|No| H
-    G -.->|Yes| I{Google Scholar via SerpApi or scholarly+proxies}
+    G -.->|Yes| I{Google Scholar via SerpApi or optional scholarly+proxies}
     I -.->|Found| D
     D --> J{SDG cached?}
     H --> J
@@ -96,6 +96,12 @@ flowchart TB
    ```bash
    pip install -r requirements.txt
    ```
+   This base profile uses SerpApi for Google Scholar lookups and does not install
+   `scholarly`, `httpx`, or `free-proxy`. To opt into the less-reliable free-proxy
+   fallback, install the complete optional profile instead:
+   ```bash
+   pip install -r requirements-scholarly.txt
+   ```
 4. **Configure sources and secrets**: Public DSpace endpoints live in `dspace_sources.toml`. Create `.streamlit/secrets.toml` for API keys and optional local datasource additions or overrides.
 5. **Run the app**:
    ```bash
@@ -103,7 +109,7 @@ flowchart TB
    ```
 6. **Use the interface**: Select one or more sources and one or more publication types. If OpenAlex is selected with a linked DSpace source, its configured institution is shown and used automatically. For an OpenAlex-only query, select an institution manually. Then choose the remaining options and press “Fetch works and build CSV.” Retrieval, deduplication and classification happen automatically.
 7. **Download your data**: After the fetch completes, you’ll see charts, a data preview, and buttons for Excel/CSV downloads.
-   - Without a SerpApi key, Google Scholar lookups rely on `scholarly` plus free proxies; this can be slower or less reliable than SerpApi.
+   - Without a SerpApi key, Google Scholar lookups are skipped unless the optional `requirements-scholarly.txt` profile is installed.
 
 ## Configuring DSpace data sources
 
@@ -158,8 +164,8 @@ http_user_agent = "OpenAlex+Aurora SDG fetcher (mailto:you@example.com)"
 # See: https://www.semanticscholar.org/product/api
 semantic_scholar_api_key = "YOUR_SEMANTIC_SCHOLAR_API_KEY"
 
-# Enable Google Scholar abstract fetching. With a SerpApi key we'll use SerpApi; without it
-# we fall back to scholarly + free proxies (less reliable).
+# Enable Google Scholar abstract fetching. With a SerpApi key we'll use SerpApi. Without it,
+# the lookup is skipped unless the optional requirements-scholarly.txt profile is installed.
 # See: https://serpapi.com/ and https://github.com/scholarly-python-package/scholarly
 google_scholar_enabled = true
 serpapi_api_key = "YOUR_SERPAPI_API_KEY"
@@ -169,8 +175,8 @@ serpapi_api_key = "YOUR_SERPAPI_API_KEY"
 default_from_date = "2020-01-01"
 ```
 - `http_user_agent` is required.
-- `semantic_scholar_api_key` and `serpapi_api_key` are optional but highly recommended for reliable abstract retrieval (without SerpApi the app falls back to scholarly free proxies). 
-- `google_scholar_enabled` controls the final fallback to Google Scholar.
+- `semantic_scholar_api_key` and `serpapi_api_key` are optional but highly recommended for reliable abstract retrieval.
+- `google_scholar_enabled` controls the final Google Scholar lookup. Without SerpApi, the app uses scholarly free proxies only when the optional profile is installed; otherwise it reports that the lookup is skipped.
 
 A complete local template, including an optional DSpace entry, is provided in [`.streamlit/secrets.sample.toml`](.streamlit/secrets.sample.toml).
 

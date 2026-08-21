@@ -65,6 +65,34 @@ class AppStateTests(unittest.TestCase):
         self.assertEqual(institution_ids, ["https://openalex.org/I123"])
         self.assertFalse(include_lineage)
 
+    def test_google_scholar_status_reports_missing_optional_fallback(self) -> None:
+        with (
+            patch.object(
+                app_module,
+                "scholarly_fallback_available",
+                return_value=False,
+            ),
+            patch.object(app_module.st, "warning") as warning,
+        ):
+            app_module.render_google_scholar_status(True, None)
+
+        message = warning.call_args.args[0]
+        self.assertIn("Lookups will be skipped", message)
+        self.assertIn("requirements-scholarly.txt", message)
+
+    def test_google_scholar_status_reports_installed_optional_fallback(self) -> None:
+        with (
+            patch.object(
+                app_module,
+                "scholarly_fallback_available",
+                return_value=True,
+            ),
+            patch.object(app_module.st, "warning") as warning,
+        ):
+            app_module.render_google_scholar_status(True, None)
+
+        self.assertIn("optional scholarly free-proxy fallback", warning.call_args.args[0])
+
     def test_institution_network_renders_nodes_above_edges_with_black_labels(self) -> None:
         rows = [
             {

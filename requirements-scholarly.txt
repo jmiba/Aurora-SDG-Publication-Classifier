@@ -1,0 +1,8 @@
+# Optional full installation profile for the less-reliable scholarly fallback.
+-r requirements.txt
+
+# scholarly 1.7.11 still passes the removed `proxies=` argument to httpx and
+# only fully supports free-proxy's pre-1.1 get_proxy_list() API.
+scholarly==1.7.11
+httpx<0.28.0
+free-proxy==1.0.6

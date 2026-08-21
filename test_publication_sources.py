@@ -1147,6 +1147,7 @@ class CacheMigrationTests(unittest.TestCase):
                 return_value=([source_publication], 1),
             ),
             patch.object(openalex_sdg, "classify_text_aurora") as classify,
+            patch.object(openalex_sdg, "upsert_work") as upsert,
         ):
             rows, _ = openalex_sdg.fetch_publications_with_sdg(
                 include_openalex=True,
@@ -1161,6 +1162,154 @@ class CacheMigrationTests(unittest.TestCase):
 
         self.assertEqual(rows[0]["abstract"], richer_abstract)
         classify.assert_not_called()
+        upsert.assert_not_called()
+
+    def test_classified_publication_is_written_once_before_sdg_result(self) -> None:
+        publication = normalize_openalex_work(
+            {
+                "id": "https://openalex.org/W-CLASSIFY-ONCE",
+                "title": "Classify once",
+                "publication_date": "2024-01-01",
+                "doi": "10.1234/classify-once",
+                "type": "article",
+                "abstract_inverted_index": {"Classify": [0], "once": [1]},
+                "authorships": [],
+            }
+        )
+        prediction = {
+            "predictions": [
+                {"sdg": {"code": "4", "name": "Quality Education"}, "prediction": 0.9}
+            ]
+        }
+        write_order = []
+
+        def record_work(row):
+            write_order.append("work")
+            cache_db.upsert_work(row)
+
+        def record_sdg_result(**kwargs):
+            write_order.append("sdg")
+            cache_db.upsert_sdg_result(**kwargs)
+
+        with (
+            patch.object(
+                openalex_sdg,
+                "fetch_openalex_records",
+                return_value=([publication], 1),
+            ),
+            patch.object(
+                openalex_sdg,
+                "classify_text_aurora",
+                return_value=(prediction, ""),
+            ),
+            patch.object(openalex_sdg, "upsert_work", side_effect=record_work) as upsert,
+            patch.object(
+                openalex_sdg,
+                "upsert_sdg_result",
+                side_effect=record_sdg_result,
+            ),
+        ):
+            rows, _ = openalex_sdg.fetch_publications_with_sdg(
+                include_openalex=True,
+                dspace_sources=[],
+                institution_id="https://openalex.org/I1",
+                from_date="2023-01-01",
+                to_date="2026-08-31",
+                work_type="article",
+                model="aurora-sdg-multi",
+                enable_google_scholar=False,
+            )
+
+        self.assertEqual(rows[0]["sdg_formatted"], "90% SDG 4 (Quality Education)")
+        self.assertEqual(upsert.call_count, 1)
+        self.assertEqual(write_order, ["work", "sdg"])
+
+    def test_work_cache_change_detects_only_new_provenance_or_richer_abstract(self) -> None:
+        cached = {
+            "publication_key": "doi:10.1234/new-provenance",
+            "source_record_keys": "openalex:W-PROVENANCE",
+            "abstract": "Stable abstract",
+        }
+        incoming = {
+            **cached,
+            "source_record_keys": (
+                "openalex:W-PROVENANCE; dspace:example:repository-item"
+            ),
+            "_source_records": [
+                {"source_record_key": "openalex:W-PROVENANCE"},
+                {"source_record_key": "dspace:example:repository-item"},
+            ],
+        }
+
+        self.assertTrue(
+            openalex_sdg._work_cache_changed(incoming, cached, "Stable abstract")
+        )
+        self.assertFalse(
+            openalex_sdg._work_cache_changed(cached, cached, "Stable abstract")
+        )
+        self.assertTrue(
+            openalex_sdg._work_cache_changed(
+                cached,
+                cached,
+                "A substantially richer abstract",
+            )
+        )
+
+    def test_sdg_cache_hit_with_new_provenance_writes_work_once(self) -> None:
+        abstract = "Stable abstract"
+        publication_key = "doi:10.1234/new-provenance"
+        cached = {
+            "publication_key": publication_key,
+            "source_record_keys": "openalex:W-PROVENANCE",
+            "title": "New provenance",
+            "abstract": abstract,
+        }
+        incoming = {
+            **cached,
+            "source_record_keys": (
+                "openalex:W-PROVENANCE; dspace:example:repository-item"
+            ),
+            "_source_records": [
+                {"source_record_key": "openalex:W-PROVENANCE"},
+                {"source_record_key": "dspace:example:repository-item"},
+            ],
+        }
+        cached_prediction = {
+            "predictions": [
+                {"sdg": {"code": "4", "name": "Quality Education"}, "prediction": 0.9}
+            ]
+        }
+
+        with (
+            patch.object(openalex_sdg, "get_cached_work", return_value=cached),
+            patch.object(
+                openalex_sdg,
+                "get_cached_sdg_result",
+                return_value={
+                    "text_hash": openalex_sdg._hash_classification_text(abstract),
+                    "sdg_response": json.dumps(cached_prediction),
+                    "sdg_formatted": "90% SDG 4 (Quality Education)",
+                    "sdg_note": "",
+                },
+            ),
+            patch.object(openalex_sdg, "classify_text_aurora") as classify,
+            patch.object(openalex_sdg, "upsert_work") as upsert,
+        ):
+            result = openalex_sdg._enrich_and_classify_publication(
+                incoming,
+                session_factory=Mock,
+                model="aurora-sdg-multi",
+                user_agent="test-agent",
+                semantic_scholar_api_key=None,
+                enable_google_scholar=False,
+                serpapi_api_key=None,
+                aurora_limiter=Mock(),
+                cancel_event=threading.Event(),
+            )
+
+        self.assertEqual(result.row["sdg_formatted"], "90% SDG 4 (Quality Education)")
+        classify.assert_not_called()
+        upsert.assert_called_once()
 
     def test_transient_classification_failure_is_retried(self) -> None:
         publication = normalize_openalex_work(

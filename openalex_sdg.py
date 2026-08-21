@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import importlib.util
 import logging
 import re
 import threading
@@ -16,12 +17,6 @@ from html import unescape
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 import requests
-
-try:
-    from scholarly import ProxyGenerator, scholarly  # type: ignore
-except Exception:  # pragma: no cover - optional dependency at runtime
-    ProxyGenerator = None
-    scholarly = None
 
 from cache_db import (
     get_cached_sdg_result,
@@ -372,7 +367,13 @@ def get_abstract_from_scholarly(
     pause: float = 1.0,
 ) -> Optional[str]:
     """Fetch an abstract via scholarly using FreeProxies when SerpApi is unavailable."""
-    if not title or scholarly is None or ProxyGenerator is None:
+    if not title or not scholarly_fallback_available():
+        return None
+
+    try:
+        from scholarly import ProxyGenerator, scholarly  # type: ignore
+    except Exception as exc:  # pragma: no cover - optional dependency import failure
+        logging.warning("Optional scholarly fallback could not be imported: %s", exc)
         return None
 
     query = f"{title} {authors}" if authors else title
@@ -421,6 +422,14 @@ def get_abstract_from_scholarly(
                 return None
             time.sleep(pause * attempt)
     return None
+
+
+def scholarly_fallback_available() -> bool:
+    """Return whether the optional scholarly fallback package is installed."""
+    try:
+        return importlib.util.find_spec("scholarly") is not None
+    except (ImportError, AttributeError, ValueError):
+        return False
 
 def abbreviate_authors(value: str) -> str:
     """Return compact 'First Author et al.' preview for UI progress messages."""
@@ -661,6 +670,37 @@ def _hash_classification_text(text: str) -> str:
     return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
 
 
+def _source_record_key_set(publication: Mapping[str, Any]) -> Set[str]:
+    """Return all source-record keys represented by a publication."""
+    keys: Set[str] = set()
+    for field in ("source_record_keys", "source_record_key"):
+        keys.update(
+            part.strip()
+            for part in str(publication.get(field) or "").split(";")
+            if part.strip()
+        )
+    for source_record in publication.get("_source_records") or []:
+        if isinstance(source_record, Mapping):
+            key = str(source_record.get("source_record_key") or "").strip()
+            if key:
+                keys.add(key)
+    return keys
+
+
+def _work_cache_changed(
+    publication: Mapping[str, Any],
+    cached_work: Optional[Mapping[str, Any]],
+    abstract: str,
+) -> bool:
+    """Return whether persistence would add provenance or a richer abstract."""
+    if not cached_work:
+        return True
+    if _source_record_key_set(publication) - _source_record_key_set(cached_work):
+        return True
+    cached_abstract = clean_html_fragment(str(cached_work.get("abstract") or ""))
+    return len(abstract) > len(cached_abstract)
+
+
 def _publication_recency_key(publication: Mapping[str, Any]) -> Tuple[str, str]:
     """Return a source-independent key that places newer publications first."""
     return (
@@ -727,12 +767,18 @@ def _enrich_and_classify_publication(
                 doi=doi,
                 publication_year=str(publication.get("publication_date") or ""),
             )
-        else:
+        elif scholarly_fallback_available():
             # scholarly mutates a module-level proxy/client, so only this fallback is
             # serialized; SerpApi and all other network stages remain parallel.
             with _SCHOLARLY_LOCK:
                 ensure_worker_active()
                 google_abstract = get_abstract_from_scholarly(title, authors_str)
+        else:
+            google_abstract = None
+            logging.debug(
+                "Skipping Google Scholar fallback because optional scholarly support "
+                "is not installed"
+            )
         if google_abstract:
             abstract_text = clean_html_fragment(google_abstract)
             result.gs_abstract_retrieved = 1
@@ -740,6 +786,7 @@ def _enrich_and_classify_publication(
     if abstract_text:
         result.total_abstracts_available = 1
     abstract_updated = bool(abstract_text and abstract_text != cached_abstract)
+    work_cache_changed = _work_cache_changed(publication, cached_work, abstract_text)
     text_for_sdg = abstract_text or title
     text_hash = _hash_classification_text(text_for_sdg)
     sdg_json: Optional[Any] = None
@@ -747,6 +794,7 @@ def _enrich_and_classify_publication(
     sdg_formatted = ""
     cached_sdg_entry: Optional[Dict[str, Any]] = None
     reused_sdg = False
+    work_written_for_classification = False
 
     if model == "skip":
         sdg_note = "skipped: user selected 'skip'"
@@ -784,6 +832,7 @@ def _enrich_and_classify_publication(
             # The canonical work must exist before its FK-bound SDG result.
             publication["abstract"] = abstract_text
             upsert_work(publication)
+            work_written_for_classification = True
             if sdg_json is not None:
                 upsert_sdg_result(
                     publication_key=publication_key,
@@ -812,7 +861,8 @@ def _enrich_and_classify_publication(
     )
     publication_for_cache = dict(row_data)
     publication_for_cache["_source_records"] = publication.get("_source_records") or []
-    upsert_work(publication_for_cache)
+    if work_cache_changed and not work_written_for_classification:
+        upsert_work(publication_for_cache)
     result.row = row_data
     return result
 
@@ -1068,4 +1118,5 @@ __all__ = [
     "is_ror_url",
     "sanitize_filename",
     "search_institutions_by_name",
+    "scholarly_fallback_available",
 ]
