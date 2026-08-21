@@ -3,7 +3,7 @@
 
 [[oai_sources]]
 id = "viadrina-opus"
-label = "Publication Server OPUS (Viadrina)"
+label = "Viadrina Publication Server OPUS"
 base_url = "https://opus4.kobv.de/opus4-euv/oai"
 metadata_prefix = "oai_dc"
 enabled = true
