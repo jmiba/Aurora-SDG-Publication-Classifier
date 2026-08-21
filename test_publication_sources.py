@@ -20,6 +20,7 @@ from publication_sources import (
     normalize_dspace_object,
     normalize_openalex_work,
     parse_dspace_sources,
+    reconcile_oa_pair,
 )
 
 
@@ -207,6 +208,38 @@ class PublicationSourceTests(unittest.TestCase):
         provenance = json.loads(merged[0]["source_provenance_json"])
         self.assertEqual({entry["source"] for entry in provenance}, {"openalex", "example"})
 
+    def test_conflicting_oa_sources_produce_a_consistent_open_pair(self) -> None:
+        openalex = normalize_openalex_work(
+            {
+                "id": "https://openalex.org/W-OA",
+                "title": "Shared OA publication",
+                "publication_date": "2024-01-01",
+                "doi": "10.1234/shared-oa",
+                "type": "article",
+                "authorships": [],
+                "open_access": {"is_oa": False, "oa_status": "closed"},
+            }
+        )
+        dspace = normalize_dspace_object(
+            dspace_search_object(
+                item_id="open-item",
+                entity_type="Article",
+                title="Shared OA publication",
+                metadata={
+                    "dc.identifier.doi": metadata_entry("10.1234/shared-oa"),
+                    "dc.date.issued": metadata_entry("2024"),
+                    "dc.rights": metadata_entry("CC-BY"),
+                },
+            ),
+            self.source,
+        )
+
+        merged = deduplicate_publications([openalex, dspace])[0]
+
+        self.assertIs(merged["is_oa"], True)
+        self.assertEqual(merged["oa_status"], "open")
+        self.assertEqual(reconcile_oa_pair(False, "gold"), (False, "closed"))
+
     def test_dspace_pagination_uses_no_media_embeds(self) -> None:
         def payload(page_number: int, item_id: str) -> dict:
             return {
@@ -332,6 +365,33 @@ class CacheMigrationTests(unittest.TestCase):
             conn.close()
         self.assertEqual(source_count, 2)
         self.assertEqual(legacy_tables, {"works", "sdg_results"})
+
+    def test_schema_repairs_a_preexisting_contradictory_oa_pair(self) -> None:
+        publication = {
+            "publication_key": "doi:10.1234/oa-repair",
+            "source": "openalex",
+            "source_record_id": "W-OA-REPAIR",
+            "source_record_key": "openalex:W-OA-REPAIR",
+            "title": "OA repair",
+            "is_oa": True,
+            "oa_status": "open",
+        }
+        cache_db.upsert_work(publication)
+        conn = sqlite3.connect(cache_db.DB_PATH)
+        try:
+            conn.execute(
+                "UPDATE canonical_works SET oa_status = 'closed' WHERE publication_key = ?",
+                (publication["publication_key"],),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        cache_db.close_connection()
+        repaired = cache_db.get_cached_publication(publication["publication_key"])
+
+        self.assertEqual(repaired["is_oa"], 1)
+        self.assertEqual(repaired["oa_status"], "open")
 
     def test_legacy_cache_is_copied_additively(self) -> None:
         conn = sqlite3.connect(cache_db.DB_PATH)
@@ -485,6 +545,59 @@ class CacheMigrationTests(unittest.TestCase):
             )
             self.assertEqual(second_rows[0]["sdg_formatted"], "90% SDG 4 (Quality Education)")
             classify.assert_not_called()
+
+    def test_transient_classification_failure_is_retried(self) -> None:
+        publication = normalize_openalex_work(
+            {
+                "id": "https://openalex.org/W-RETRY",
+                "title": "Retry classification",
+                "publication_date": "2024-01-01",
+                "doi": "10.1234/retry",
+                "type": "article",
+                "abstract_inverted_index": {"Retry": [0], "abstract": [1]},
+                "authorships": [],
+                "open_access": {"is_oa": True, "oa_status": "gold"},
+            }
+        )
+        prediction = {
+            "predictions": [
+                {"sdg": {"code": "4", "name": "Quality Education"}, "prediction": 0.9}
+            ]
+        }
+        with (
+            patch.object(
+                openalex_sdg,
+                "fetch_openalex_records",
+                return_value=([publication], 1),
+            ),
+            patch.object(
+                openalex_sdg,
+                "classify_text_aurora",
+                side_effect=[(None, "http_error:503"), (prediction, "")],
+            ) as classify,
+        ):
+            kwargs = {
+                "include_openalex": True,
+                "dspace_sources": [],
+                "institution_id": "https://openalex.org/I1",
+                "from_date": "2023-01-01",
+                "to_date": "2026-08-31",
+                "work_type": "article",
+                "model": "aurora-sdg-multi",
+                "enable_google_scholar": False,
+            }
+            first_rows, _ = openalex_sdg.fetch_publications_with_sdg(**kwargs)
+            failed_cache = cache_db.get_cached_sdg_result(
+                "doi:10.1234/retry", "aurora-sdg-multi"
+            )
+            second_rows, _ = openalex_sdg.fetch_publications_with_sdg(**kwargs)
+
+        self.assertEqual(first_rows[0]["sdg_note"], "http_error:503")
+        self.assertIsNone(failed_cache)
+        self.assertEqual(
+            second_rows[0]["sdg_formatted"], "90% SDG 4 (Quality Education)"
+        )
+        self.assertEqual(classify.call_count, 2)
 
 
 if __name__ == "__main__":

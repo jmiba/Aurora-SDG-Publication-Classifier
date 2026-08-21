@@ -7,7 +7,7 @@ import json
 import networkx as nx
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 from xml.sax.saxutils import escape
 from zipfile import ZipFile, ZIP_DEFLATED
 
@@ -78,6 +78,7 @@ CSV_FIELDNAMES = [
     "source_provenance_json",
 ]
 RESULT_SESSION_KEY = "fetch_result"
+RESULT_SCHEMA_VERSION = 2
 SDG_THRESHOLD_PERCENT = 3.0
 OA_STATUS_ORDER = ["diamond", "gold", "hybrid", "green", "bronze", "open", "closed", "unknown"]
 OA_STATUS_COLORS = {
@@ -1287,6 +1288,19 @@ def _reset_fetch_state(
     st.session_state["fetch_cancel_requested"] = False
 
 
+def _result_payload_matches_params(
+    result_payload: Mapping[str, Any],
+    current_params: Mapping[str, Any],
+) -> bool:
+    """Return whether a completed result belongs to the active query controls."""
+    stored_params = result_payload.get("params")
+    return (
+        result_payload.get("schema_version") == RESULT_SCHEMA_VERSION
+        and isinstance(stored_params, Mapping)
+        and dict(stored_params) == dict(current_params)
+    )
+
+
 def main():
     """Streamlit entry point that wires all widgets, fetch flow, and previews."""
     st.set_page_config(page_title="Aurora SDG Publication Classifier", layout="wide")
@@ -1381,6 +1395,17 @@ def main():
     result_payload = st.session_state.get(RESULT_SESSION_KEY)
     st.session_state.setdefault("fetch_cancel_requested", False)
     st.session_state.setdefault("fetch_in_progress", False)
+    result_invalidated = False
+    if (
+        result_payload
+        and not st.session_state["fetch_in_progress"]
+        and not _result_payload_matches_params(result_payload, current_params)
+    ):
+        st.session_state.pop(RESULT_SESSION_KEY, None)
+        st.session_state.pop("preview_focus_index", None)
+        st.session_state["preview_page"] = 1
+        result_payload = None
+        result_invalidated = True
 
     cancel_button_placeholder = st.empty() # New placeholder for the cancel button
 
@@ -1481,6 +1506,7 @@ def main():
         _reset_fetch_state(progress_bar, progress_text, progress_detail, cancel_button_placeholder) # Use new placeholder
         csv_bytes = rows_to_csv_bytes(rows)
         result_payload = {
+            "schema_version": RESULT_SCHEMA_VERSION,
             "csv_bytes": csv_bytes,
             "rows": rows,
             "stats": stats,
@@ -1493,7 +1519,10 @@ def main():
         st.rerun() # Rerun to display results after fetch completes.
 
     elif not result_payload:
-        st.info("Click the button above to fetch publications.")
+        if result_invalidated:
+            st.info("Query settings changed. Fetch again to build results for the current settings.")
+        else:
+            st.info("Click the button above to fetch publications.")
         return
 
     csv_bytes: bytes = result_payload["csv_bytes"]

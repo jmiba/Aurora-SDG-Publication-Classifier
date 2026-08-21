@@ -21,6 +21,7 @@ OPENALEX_WORKS_URL = "https://api.openalex.org/works"
 OPENALEX_PER_PAGE = 200
 DSpaceProgressHook = Optional[Callable[[str], None]]
 CancelCheck = Optional[Callable[[], bool]]
+OPEN_OA_STATUSES = {"diamond", "gold", "hybrid", "green", "bronze", "open"}
 
 
 class SourceFetchCancelled(Exception):
@@ -195,6 +196,20 @@ def _dspace_oa(metadata: Mapping[str, Any]) -> Tuple[Optional[bool], str]:
         for token in ("cc-by", "cc by", "creative commons", "openaccess", "open access")
     ):
         return True, "open"
+    return None, "unknown"
+
+
+def reconcile_oa_pair(is_oa: Any, oa_status: Any) -> Tuple[Optional[bool], str]:
+    """Return an internally consistent Open Access boolean/status pair."""
+    status = str(oa_status or "unknown").strip().lower() or "unknown"
+    if is_oa is True:
+        return True, status if status in OPEN_OA_STATUSES else "open"
+    if is_oa is False:
+        return False, "closed"
+    if status in OPEN_OA_STATUSES:
+        return True, status
+    if status == "closed":
+        return False, "closed"
     return None, "unknown"
 
 
@@ -561,17 +576,28 @@ def _merge_publication(base: Dict[str, Any], incoming: Mapping[str, Any]) -> Non
     if not base.get("openalex_id") and incoming.get("openalex_id"):
         base["openalex_id"] = incoming.get("openalex_id")
 
-    oa_values = [base.get("is_oa"), incoming.get("is_oa")]
+    base_oa, current_status = reconcile_oa_pair(base.get("is_oa"), base.get("oa_status"))
+    incoming_oa, incoming_status = reconcile_oa_pair(
+        incoming.get("is_oa"), incoming.get("oa_status")
+    )
+    oa_values = [base_oa, incoming_oa]
     if True in oa_values:
         base["is_oa"] = True
+        open_statuses = [
+            status
+            for status in (current_status, incoming_status)
+            if status in OPEN_OA_STATUSES
+        ]
+        base["oa_status"] = next(
+            (status for status in open_statuses if status != "open"),
+            open_statuses[0] if open_statuses else "open",
+        )
     elif False in oa_values:
         base["is_oa"] = False
+        base["oa_status"] = "closed"
     else:
         base["is_oa"] = None
-    current_status = str(base.get("oa_status") or "unknown")
-    incoming_status = str(incoming.get("oa_status") or "unknown")
-    if current_status in {"", "unknown"} and incoming_status not in {"", "unknown"}:
-        base["oa_status"] = incoming_status
+        base["oa_status"] = "unknown"
 
     try:
         current_affiliations = json.loads(base.get("institution_affiliations_json") or "[]")
@@ -617,6 +643,9 @@ def deduplicate_publications(records: Sequence[Mapping[str, Any]]) -> List[Dict[
 
     publications: List[Dict[str, Any]] = []
     for merged in grouped.values():
+        merged["is_oa"], merged["oa_status"] = reconcile_oa_pair(
+            merged.get("is_oa"), merged.get("oa_status")
+        )
         source_records = merged.get("_source_records") or []
         sources = list(dict.fromkeys(record["source"] for record in source_records if record["source"]))
         source_ids = [record["source_record_id"] for record in source_records if record["source_record_id"]]
@@ -652,4 +681,5 @@ __all__ = [
     "normalize_openalex_work",
     "parse_dspace_sources",
     "publication_deduplication_key",
+    "reconcile_oa_pair",
 ]

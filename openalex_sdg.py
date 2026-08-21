@@ -930,12 +930,13 @@ def fetch_publications_with_sdg(
             else:
                 cached_sdg_entry = get_cached_sdg_result(publication_key, model)
                 cached_hash = str((cached_sdg_entry or {}).get("text_hash") or "")
-                should_reuse = bool(cached_sdg_entry) and (
+                cached_response = str((cached_sdg_entry or {}).get("sdg_response") or "")
+                should_reuse = bool(cached_response.strip()) and (
                     cached_hash == text_hash or (not cached_hash and not abstract_updated)
                 )
                 if should_reuse:
                     reused_sdg = True
-                    raw_json = cached_sdg_entry.get("sdg_response") or ""
+                    raw_json = cached_response
                     if raw_json:
                         try:
                             sdg_json = json.loads(raw_json)
@@ -956,14 +957,15 @@ def fetch_publications_with_sdg(
                     # The canonical work must exist before its FK-bound SDG result.
                     publication["abstract"] = abstract_text
                     upsert_work(publication)
-                    upsert_sdg_result(
-                        publication_key=publication_key,
-                        model=model,
-                        sdg_response=sdg_json,
-                        sdg_formatted=sdg_formatted,
-                        sdg_note=sdg_note,
-                        text_hash=text_hash,
-                    )
+                    if sdg_json is not None:
+                        upsert_sdg_result(
+                            publication_key=publication_key,
+                            model=model,
+                            sdg_response=sdg_json,
+                            sdg_formatted=sdg_formatted,
+                            sdg_note=sdg_note,
+                            text_hash=text_hash,
+                        )
                     time.sleep(0.12)
 
             sdg_raw = json.dumps(sdg_json, ensure_ascii=False) if sdg_json is not None else ""

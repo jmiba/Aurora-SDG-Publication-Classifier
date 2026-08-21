@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
 
-from publication_sources import publication_deduplication_key
+from publication_sources import publication_deduplication_key, reconcile_oa_pair
 
 
 DB_PATH = Path("cache.sqlite3")
@@ -175,6 +175,44 @@ def _init_schema(conn: sqlite3.Connection) -> None:
                 "INSERT INTO cache_meta(key, value) VALUES ('legacy_import_v2', ?)",
                 (_now(),),
             )
+        _repair_oa_consistency(conn)
+
+
+def _repair_oa_consistency(conn: sqlite3.Connection) -> None:
+    """Repair contradictory Open Access pairs written by earlier app versions."""
+    open_statuses = "'diamond', 'gold', 'hybrid', 'green', 'bronze', 'open'"
+    conn.execute(
+        f"""
+        UPDATE canonical_works
+        SET oa_status = 'open'
+        WHERE is_oa = 1
+          AND lower(trim(COALESCE(oa_status, ''))) NOT IN ({open_statuses})
+        """
+    )
+    conn.execute(
+        f"""
+        UPDATE canonical_works
+        SET oa_status = 'closed'
+        WHERE is_oa = 0
+          AND lower(trim(COALESCE(oa_status, ''))) <> 'closed'
+        """
+    )
+    conn.execute(
+        f"""
+        UPDATE canonical_works
+        SET is_oa = 1
+        WHERE is_oa IS NULL
+          AND lower(trim(COALESCE(oa_status, ''))) IN ({open_statuses})
+        """
+    )
+    conn.execute(
+        """
+        UPDATE canonical_works
+        SET is_oa = 0
+        WHERE is_oa IS NULL
+          AND lower(trim(COALESCE(oa_status, ''))) = 'closed'
+        """
+    )
 
 
 def _migrate_legacy_rows(conn: sqlite3.Connection) -> None:
@@ -300,6 +338,7 @@ def upsert_publication(row: Mapping[str, Any]) -> None:
     publication_key = str(row.get("publication_key") or "").strip()
     if not publication_key:
         raise ValueError("publication_key is required")
+    is_oa, oa_status = reconcile_oa_pair(row.get("is_oa"), row.get("oa_status"))
     payload = {
         "publication_key": publication_key,
         "source": row.get("source") or "unknown",
@@ -313,8 +352,8 @@ def upsert_publication(row: Mapping[str, Any]) -> None:
         "doi": row.get("doi"),
         "type": row.get("type"),
         "language": row.get("language"),
-        "is_oa": int(row.get("is_oa")) if row.get("is_oa") is not None else None,
-        "oa_status": row.get("oa_status") or "unknown",
+        "is_oa": int(is_oa) if is_oa is not None else None,
+        "oa_status": oa_status,
         "authors": row.get("authors"),
         "institutions": row.get("institutions"),
         "institution_ids": row.get("institution_ids"),
