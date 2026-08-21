@@ -1481,8 +1481,8 @@ def render_publication_type_selector(
     st.subheader("3. Publication types", divider="blue")
     openalex_types = [
         "article", "book", "book-chapter", "proceedings-article", "proceedings",
-        "reference-entry", "report", "dissertation", "dataset", "review",
-        "editorial", "letter", "standard", "other",
+        "reference-entry", "report", "dissertation", "dataset", "software",
+        "review", "editorial", "letter", "standard", "other",
     ]
     entity_type_mappings = {
         "article": ["article"],
@@ -1509,6 +1509,7 @@ def render_publication_type_selector(
         "book": "Monographs / books",
         "book-chapter": "Book chapters",
         "artistic-work": "Artistic works",
+        "software": "Software",
         "proceedings-article": "Proceedings articles",
         "reference-entry": "Reference entries",
     }

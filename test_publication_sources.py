@@ -541,6 +541,14 @@ class PublicationSourceTests(unittest.TestCase):
         self.assertIn("institutions.id:I123", filter_value)
         self.assertIn("type:article|book|book-chapter", filter_value)
 
+        software_filter = openalex_sdg.make_filter(
+            "https://openalex.org/I123",
+            "2023-01-01",
+            ["software"],
+            "2026-08-31",
+        )
+        self.assertIn("type:software", software_filter)
+
     def test_serpapi_rejects_similar_but_different_title(self) -> None:
         response = FakeResponse(
             {

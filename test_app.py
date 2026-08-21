@@ -356,6 +356,7 @@ class AppStateTests(unittest.TestCase):
             any("Search by institution" in widget.label for widget in app.text_input)
         )
         self.assertIn("Artistic works", app.multiselect[1].options)
+        self.assertIn("Software", app.multiselect[1].options)
 
     def test_publication_type_selector_is_multichoice_and_expands_dspace_books(self) -> None:
         source = app_module.DSpaceSource(
