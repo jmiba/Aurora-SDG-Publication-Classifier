@@ -7,6 +7,8 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-08-21
+
 ### Added
 
 - Generic public OAI-PMH harvesting with Dublin Core normalization, safe XML
@@ -70,4 +72,6 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   tracked source tree.
 - Required a non-placeholder contact address before OpenAlex queries can run.
 
+[Unreleased]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/1.1.0...HEAD
+[1.1.0]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/1.0.0...1.1.0
 [1.0.0]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/releases/tag/1.0.0
