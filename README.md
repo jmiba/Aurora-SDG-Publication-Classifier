@@ -105,11 +105,44 @@ flowchart TB
 7. **Download your data**: After the fetch completes, you’ll see charts, a data preview, and buttons for Excel/CSV downloads.
    - Without a SerpApi key, Google Scholar lookups rely on `scholarly` plus free proxies; this can be slower or less reliable than SerpApi.
 
+## Configuring DSpace data sources
+
+Public DSpace repositories are registered in the tracked [`dspace_sources.toml`](dspace_sources.toml) file. SWPS SHARE is the initial entry, but it uses the same generic adapter as every other configured repository.
+
+Add another `[[dspace_sources]]` table for each public DSpace REST API you want to expose in the source selector:
+
+```toml
+[[dspace_sources]]
+id = "another-university"
+label = "Another University Repository"
+base_url = "https://repository.example.edu/server/api"
+configuration = "default"
+enabled = true
+entity_types = ["Article", "Book", "Artistic"]
+
+# Optional: restrict searches to a DSpace community or collection UUID.
+# scope = "COMMUNITY-OR-COLLECTION-UUID"
+```
+
+Configuration fields:
+
+- `id` is a unique, stable source identifier. Use lowercase letters, numbers, `_`, or `-`; the first character must be a letter or number.
+- `label` is the name displayed in the Streamlit source selector.
+- `base_url` is the DSpace REST root and normally ends in `/server/api`. The app adds `/discover/search/objects` automatically.
+- `configuration` names the DSpace Discovery configuration, usually `default`.
+- `enabled` controls whether the source appears in the application without deleting its configuration.
+- `entity_types` lists the DSpace entity categories to query. Values must match those used by that repository. The defaults are `Article`, `Book`, and `Artistic`.
+- `scope` is optional and restricts searches to a community or collection UUID.
+
+When multiple sources are selected, the app queries them independently in one automated run, normalizes their metadata, and deduplicates matching publications before enrichment and SDG classification.
+
+For an untracked local source, put the same `[[dspace_sources]]` structure in `.streamlit/secrets.toml`. A local entry with the same `id` replaces the tracked entry; a new `id` adds another source. Restart Streamlit after changing source configuration if the running app does not rerun automatically.
+
+The current adapter supports public DSpace REST APIs. Authenticated or private repositories require additional authentication support; do not place credentials in `dspace_sources.toml`.
+
 ## Configuring secrets
 
-The tracked `dspace_sources.toml` contains public endpoints and initially enables SWPS SHARE. Add repeatable `[[dspace_sources]]` tables there for other public repositories. Local `[[dspace_sources]]` entries in `.streamlit/secrets.toml` override matching IDs or add untracked instances.
-
-The app relies on Streamlit’s secrets mechanism for API keys. Create a `.streamlit/secrets.toml` file with entries like:
+The app relies on Streamlit’s secrets mechanism for API keys and optional untracked DSpace entries. Create a `.streamlit/secrets.toml` file with entries like:
 
 ```toml
 # A descriptive User-Agent string, including a contact email, is required for OpenAlex politeness.
@@ -125,16 +158,6 @@ semantic_scholar_api_key = "YOUR_SEMANTIC_SCHOLAR_API_KEY"
 google_scholar_enabled = true
 serpapi_api_key = "YOUR_SERPAPI_API_KEY"
 
-# Repeat this table for every public DSpace repository to expose in the UI.
-[[dspace_sources]]
-id = "swps-share"
-label = "SWPS SHARE"
-base_url = "https://share.swps.edu.pl/server/api"
-configuration = "default"
-enabled = true
-entity_types = ["Article", "Book", "Artistic"]
-
-
 [advanced_options]
 # Sets the default start of the publication date slider, e.g., "2020-01-01".
 default_from_date = "2020-01-01"
@@ -142,11 +165,8 @@ default_from_date = "2020-01-01"
 - `http_user_agent` is required.
 - `semantic_scholar_api_key` and `serpapi_api_key` are optional but highly recommended for reliable abstract retrieval (without SerpApi the app falls back to scholarly free proxies). 
 - `google_scholar_enabled` controls the final fallback to Google Scholar.
-- `dspace_sources` is a repeatable list. Each `id` must be unique and becomes part of the source-qualified record key.
-- `base_url` points to the DSpace REST root ending in `/server/api`; `scope` may optionally restrict queries to a community or collection UUID.
-- DSpace `Article`, `Book`, and `Artistic` are source entity categories. More specific `dc.type` metadata is normalized where available, so a `Book` result can become `book-chapter`.
 
-A sample file is included at `.streamlit/secrets.sample.toml`.
+A complete local template, including an optional DSpace entry, is provided in [`.streamlit/secrets.sample.toml`](.streamlit/secrets.sample.toml).
 
 ---
 

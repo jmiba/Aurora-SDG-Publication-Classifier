@@ -574,7 +574,7 @@ def render_institution_network(
         x0, y0, z0 = node_positions[a]
         x1, y1, z1 = node_positions[b]
         width = max(1.0, min(10.0, w * 2.0))
-        alpha = min(0.85, 0.4 + 0.15 * (w - 1))
+        alpha = min(0.75, 0.5 + 0.15 * (w - 1))
         mid_x = (x0 + x1) / 2
         mid_y = (y0 + y1) / 2
         mid_z = (z0 + z1) / 2
