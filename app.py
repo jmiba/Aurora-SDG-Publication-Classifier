@@ -574,11 +574,11 @@ def render_institution_network(
         x0, y0, z0 = node_positions[a]
         x1, y1, z1 = node_positions[b]
         width = max(1.0, min(10.0, w * 2.0))
-        alpha = min(1.0, 0.5 + 0.2 * (w - 1))
+        alpha = min(0.85, 0.4 + 0.15 * (w - 1))
         mid_x = (x0 + x1) / 2
         mid_y = (y0 + y1) / 2
         mid_z = (z0 + z1) / 2
-        edge_color = f"rgba(93,93,93,{alpha})"
+        edge_color = f"rgba(130,130,130,{alpha})"
         edge_traces.append(
             go.Scatter3d(
                 x=[x0, x1, mid_x, None],
@@ -588,7 +588,7 @@ def render_institution_network(
                 line=dict(color=edge_color, width=width),
                 hoverinfo="text",
                 text=["", "", f"Co-authored works: {w}", ""],
-                hoverlabel=dict(bgcolor=edge_color, font=dict(color="#ffffff")),
+                hoverlabel=dict(bgcolor=edge_color, font=dict(color="#000000")),
             )
         )
 
@@ -619,15 +619,17 @@ def render_institution_network(
             colorscale=[[0, "#b4a4e8"], [1, "#4d1fe3"]],  # light violet to dark
             showscale=True,
             colorbar=dict(title="Degree"),
-            opacity=0.999,
+            opacity=1.0,
+            line=dict(color="#ffffff", width=2),
         ),
         text=[txt.split(" (")[0] for txt in node_text],
         textposition="top center",
-        textfont=dict(size=14),
+        textfont=dict(size=14, color="#000000"),
         hovertext=node_text,
         hoverinfo="text",
     )
-    fig = go.Figure(data=edge_traces + [node_trace])
+    # Keep the opaque node layer last so it renders in front of the edge layer.
+    fig = go.Figure(data=[*edge_traces, node_trace])
     fig.update_layout(
         showlegend=False,
         margin=dict(l=0, r=0, t=0, b=0),

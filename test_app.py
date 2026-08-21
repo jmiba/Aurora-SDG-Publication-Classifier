@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from streamlit.testing.v1 import AppTest
 
@@ -11,6 +12,45 @@ from openalex_sdg import FetchStats
 
 
 class AppStateTests(unittest.TestCase):
+    def test_institution_network_renders_nodes_above_edges_with_black_labels(self) -> None:
+        rows = [
+            {
+                "publication_date": "2024-05-01",
+                "institution_affiliations_json": (
+                    '[{"id":"I1","name":"Primary University","country":"DE"},'
+                    '{"id":"I2","name":"Partner University","country":"PL"}]'
+                ),
+            }
+        ]
+
+        with patch.object(app_module.st, "plotly_chart") as plotly_chart:
+            app_module.render_institution_network(
+                rows,
+                "2024-01-01",
+                "2024-12-31",
+                selected_institution_id="I1",
+            )
+
+        figure = plotly_chart.call_args.args[0]
+        node_trace = figure.data[-1]
+        self.assertEqual(node_trace.mode, "markers+text")
+        self.assertEqual(node_trace.marker.opacity, 1.0)
+        self.assertEqual(node_trace.marker.line.color, "#ffffff")
+        self.assertEqual(node_trace.textfont.color, "#000000")
+        self.assertTrue(all(trace.mode == "lines" for trace in figure.data[:-1]))
+        self.assertTrue(
+            all(
+                trace.line.color.startswith("rgba(130,130,130,")
+                for trace in figure.data[:-1]
+            )
+        )
+        self.assertTrue(
+            all(
+                trace.hoverlabel.font.color == "#000000"
+                for trace in figure.data[:-1]
+            )
+        )
+
     def test_result_payload_requires_current_schema_and_matching_params(self) -> None:
         params = {"sources": ["openalex"], "from": "2024-01-01"}
         current = {
