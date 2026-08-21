@@ -1,0 +1,491 @@
+"""Unit tests for generic DSpace normalization, deduplication, and caching."""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+import tempfile
+import unittest
+from datetime import date
+from pathlib import Path
+from unittest.mock import patch
+
+import cache_db
+import openalex_sdg
+from publication_sources import (
+    DSpaceSource,
+    deduplicate_publications,
+    end_of_month,
+    fetch_dspace_records,
+    normalize_dspace_object,
+    normalize_openalex_work,
+    parse_dspace_sources,
+)
+
+
+def dspace_search_object(
+    *,
+    item_id: str,
+    entity_type: str,
+    title: str,
+    metadata: dict,
+) -> dict:
+    return {
+        "_embedded": {
+            "indexableObject": {
+                "id": item_id,
+                "uuid": item_id,
+                "name": title,
+                "handle": f"repo/{item_id}",
+                "entityType": entity_type,
+                "type": "item",
+                "metadata": metadata,
+                "_links": {
+                    # Adapters must not follow or expose media links.
+                    "thumbnail": {"href": f"https://repo.example/thumbnail/{item_id}"},
+                    "bundles": {"href": f"https://repo.example/bundles/{item_id}"},
+                },
+            }
+        }
+    }
+
+
+def metadata_entry(value: str) -> list:
+    return [{"value": value}]
+
+
+class FakeResponse:
+    def __init__(self, payload: dict, status_code: int = 200):
+        self._payload = payload
+        self.status_code = status_code
+        self.headers = {}
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+    def json(self) -> dict:
+        return self._payload
+
+
+class FakeSession:
+    def __init__(self, payloads: list):
+        self.payloads = list(payloads)
+        self.calls = []
+
+    def get(self, url, *, params, headers, timeout):
+        self.calls.append({"url": url, "params": dict(params), "headers": dict(headers), "timeout": timeout})
+        return FakeResponse(self.payloads.pop(0))
+
+
+class PublicationSourceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.source = DSpaceSource(
+            id="example",
+            label="Example Repository",
+            base_url="https://repo.example/server/api",
+        )
+
+    def test_parse_multiple_generic_dspace_sources(self) -> None:
+        sources = parse_dspace_sources(
+            [
+                {
+                    "id": "source-one",
+                    "label": "Source One",
+                    "base_url": "https://one.example/server/api",
+                    "entity_types": ["Article"],
+                },
+                {
+                    "id": "source-two",
+                    "label": "Source Two",
+                    "base_url": "https://two.example/server/api",
+                    "enabled": True,
+                },
+                {
+                    "id": "disabled",
+                    "base_url": "https://disabled.example/server/api",
+                    "enabled": False,
+                },
+            ]
+        )
+        self.assertEqual([source.id for source in sources], ["source-one", "source-two"])
+        self.assertEqual(sources[0].entity_types, ("Article",))
+
+    def test_normalize_article_without_exposing_artwork_or_thumbnail_media(self) -> None:
+        record = dspace_search_object(
+            item_id="article-1",
+            entity_type="Article",
+            title="A useful article",
+            metadata={
+                "dc.abstract.en": metadata_entry("English abstract"),
+                "dc.contributor.author": metadata_entry("Doe, Jane"),
+                "dc.date.issued": metadata_entry("2024-04"),
+                "dc.identifier.doi": metadata_entry("invalid-prefix"),
+                "dc.identifier.weblink": metadata_entry("https://doi.org/10.1234/Example.DOI"),
+                "dc.identifier.uri": metadata_entry("https://repo.example/handle/repo/1"),
+                "dc.language": metadata_entry("en"),
+                "dc.rights": metadata_entry("CC-BY"),
+                "dc.type": metadata_entry("JournalArticle"),
+                "dc.affiliation": metadata_entry("Example University"),
+            },
+        )
+        normalized = normalize_dspace_object(record, self.source)
+        self.assertEqual(normalized["type"], "article")
+        self.assertEqual(normalized["doi"], "https://doi.org/10.1234/example.doi")
+        self.assertEqual(normalized["is_oa"], True)
+        self.assertNotIn("thumbnail", normalized)
+        self.assertNotIn("image", normalized)
+        self.assertNotIn("bundles", normalized)
+
+    def test_book_chapter_and_multilingual_artistic_abstracts(self) -> None:
+        book = normalize_dspace_object(
+            dspace_search_object(
+                item_id="book-1",
+                entity_type="Book",
+                title="Chapter",
+                metadata={
+                    "dc.type": metadata_entry("MonographyChapter"),
+                    "dc.date.issued": metadata_entry("2025"),
+                    "dc.rights": metadata_entry("ClosedAccess"),
+                },
+            ),
+            self.source,
+        )
+        artwork = normalize_dspace_object(
+            dspace_search_object(
+                item_id="art-1",
+                entity_type="Artistic",
+                title="Artwork documentation",
+                metadata={
+                    "dc.abstract.author": metadata_entry("Author description"),
+                    "dc.abstract.en": metadata_entry("English description"),
+                    "dc.abstract.pl": metadata_entry("Polski opis"),
+                    "dc.date.issued": metadata_entry("2023-09-15"),
+                    "dc.type": metadata_entry("ArtProjectAuthor"),
+                },
+            ),
+            self.source,
+        )
+        self.assertEqual(book["type"], "book-chapter")
+        self.assertEqual(book["is_oa"], False)
+        self.assertEqual(artwork["type"], "artistic-work")
+        self.assertEqual(artwork["abstract"], "English description")
+        self.assertEqual(artwork["language"], "")
+
+    def test_exact_doi_records_are_automatically_merged_with_provenance(self) -> None:
+        openalex = normalize_openalex_work(
+            {
+                "id": "https://openalex.org/W1",
+                "title": "Shared publication",
+                "publication_date": "2024-01-01",
+                "doi": "https://doi.org/10.1234/shared",
+                "type": "article",
+                "authorships": [{"author": {"display_name": "Jane Doe"}, "institutions": []}],
+                "open_access": {"is_oa": None},
+            }
+        )
+        dspace = normalize_dspace_object(
+            dspace_search_object(
+                item_id="item-1",
+                entity_type="Article",
+                title="Shared publication",
+                metadata={
+                    "dc.identifier.doi": metadata_entry("10.1234/shared"),
+                    "dc.contributor.author": metadata_entry("Doe, Jane"),
+                    "dc.date.issued": metadata_entry("2024"),
+                    "dc.abstract.en": metadata_entry("The longer repository abstract."),
+                    "dc.type": metadata_entry("JournalArticle"),
+                },
+            ),
+            self.source,
+        )
+        merged = deduplicate_publications([openalex, dspace])
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["publication_key"], "doi:10.1234/shared")
+        self.assertEqual(merged[0]["source_count"], 2)
+        self.assertEqual(merged[0]["abstract"], "The longer repository abstract.")
+        provenance = json.loads(merged[0]["source_provenance_json"])
+        self.assertEqual({entry["source"] for entry in provenance}, {"openalex", "example"})
+
+    def test_dspace_pagination_uses_no_media_embeds(self) -> None:
+        def payload(page_number: int, item_id: str) -> dict:
+            return {
+                "_embedded": {
+                    "searchResult": {
+                        "page": {
+                            "number": page_number,
+                            "size": 1,
+                            "totalPages": 2,
+                            "totalElements": 2,
+                        },
+                        "_embedded": {
+                            "objects": [
+                                dspace_search_object(
+                                    item_id=item_id,
+                                    entity_type="Article",
+                                    title=f"Article {item_id}",
+                                    metadata={
+                                        "dc.date.issued": metadata_entry("2024"),
+                                        "dc.type": metadata_entry("JournalArticle"),
+                                    },
+                                )
+                            ]
+                        },
+                    }
+                }
+            }
+
+        session = FakeSession([payload(0, "one"), payload(1, "two")])
+        records, total = fetch_dspace_records(
+            session,
+            DSpaceSource(
+                id="article-only",
+                label="Article Repository",
+                base_url="https://repo.example/server/api",
+                entity_types=("Article",),
+            ),
+            from_date="2023-01-01",
+            to_date="2026-08-31",
+            work_type="article",
+            user_agent="test-agent",
+            page_size=1,
+        )
+        self.assertEqual(len(records), 2)
+        self.assertEqual(total, 2)
+        self.assertEqual([call["params"]["page"] for call in session.calls], [0, 1])
+        for call in session.calls:
+            serialized = json.dumps(call["params"]).lower()
+            self.assertNotIn("embed", serialized)
+            self.assertNotIn("thumbnail", serialized)
+            self.assertNotIn("metrics", serialized)
+
+    def test_end_of_month_including_leap_year(self) -> None:
+        self.assertEqual(end_of_month(date(2024, 2, 1)), date(2024, 2, 29))
+        self.assertEqual(end_of_month(date(2025, 2, 1)), date(2025, 2, 28))
+
+
+class CacheMigrationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        cache_db.close_connection()
+        self.original_path = cache_db.DB_PATH
+        self.temp_dir = tempfile.TemporaryDirectory()
+        cache_db.DB_PATH = Path(self.temp_dir.name) / "cache.sqlite3"
+
+    def tearDown(self) -> None:
+        cache_db.close_connection()
+        cache_db.DB_PATH = self.original_path
+        self.temp_dir.cleanup()
+
+    def test_v2_cache_keeps_source_records_and_text_hash(self) -> None:
+        publication = {
+            "publication_key": "doi:10.1234/shared",
+            "source": "openalex; example",
+            "source_record_id": "W1; item-1",
+            "source_record_keys": "openalex:W1; dspace:example:item-1",
+            "record_url": "https://openalex.org/W1",
+            "title": "Shared publication",
+            "abstract": "Shared abstract",
+            "source_count": 2,
+            "_source_records": [
+                {
+                    "source": "openalex",
+                    "source_label": "OpenAlex",
+                    "source_record_id": "W1",
+                    "source_record_key": "openalex:W1",
+                    "record_url": "https://openalex.org/W1",
+                    "raw_record": {"id": "https://openalex.org/W1"},
+                },
+                {
+                    "source": "example",
+                    "source_label": "Example Repository",
+                    "source_record_id": "item-1",
+                    "source_record_key": "dspace:example:item-1",
+                    "record_url": "https://repo.example/handle/item-1",
+                    "raw_record": {"uuid": "item-1"},
+                },
+            ],
+        }
+        cache_db.upsert_work(publication)
+        cache_db.upsert_sdg_result(
+            publication_key=publication["publication_key"],
+            model="aurora-sdg-multi",
+            sdg_response={"predictions": []},
+            sdg_formatted="",
+            sdg_note="",
+            text_hash="abc123",
+        )
+        cached = cache_db.get_cached_publication(publication["publication_key"])
+        sdg = cache_db.get_cached_sdg_result(publication["publication_key"], "aurora-sdg-multi")
+        self.assertEqual(cached["source_count"], 2)
+        self.assertEqual(sdg["text_hash"], "abc123")
+
+        conn = sqlite3.connect(cache_db.DB_PATH)
+        try:
+            source_count = conn.execute("SELECT COUNT(*) FROM source_records").fetchone()[0]
+            legacy_tables = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('works', 'sdg_results')"
+                )
+            }
+        finally:
+            conn.close()
+        self.assertEqual(source_count, 2)
+        self.assertEqual(legacy_tables, {"works", "sdg_results"})
+
+    def test_legacy_cache_is_copied_additively(self) -> None:
+        conn = sqlite3.connect(cache_db.DB_PATH)
+        try:
+            conn.executescript(
+                """
+                CREATE TABLE works (
+                    openalex_id TEXT PRIMARY KEY, title TEXT, publication_date TEXT,
+                    doi TEXT, type TEXT, language TEXT, is_oa INTEGER, oa_status TEXT,
+                    authors TEXT, institutions TEXT, institution_affiliations_json TEXT,
+                    abstract TEXT, raw_json TEXT, updated_at TEXT
+                );
+                CREATE TABLE sdg_results (
+                    openalex_id TEXT NOT NULL, model TEXT NOT NULL, sdg_response TEXT,
+                    sdg_formatted TEXT, sdg_note TEXT, classified_at TEXT,
+                    PRIMARY KEY (openalex_id, model)
+                );
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO works (
+                    openalex_id, title, publication_date, doi, type, authors, abstract
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "https://openalex.org/WLEGACY",
+                    "Legacy publication",
+                    "2024-01-01",
+                    "https://doi.org/10.1234/legacy",
+                    "article",
+                    "Doe, Jane",
+                    "Legacy abstract",
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO sdg_results (
+                    openalex_id, model, sdg_response, sdg_formatted, sdg_note
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    "https://openalex.org/WLEGACY",
+                    "aurora-sdg-multi",
+                    "{}",
+                    "",
+                    "legacy",
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        migrated = cache_db.get_cached_publication("doi:10.1234/legacy")
+        migrated_sdg = cache_db.get_cached_sdg_result(
+            "doi:10.1234/legacy", "aurora-sdg-multi"
+        )
+        self.assertEqual(migrated["openalex_id"], "https://openalex.org/WLEGACY")
+        self.assertEqual(migrated_sdg["text_hash"], "")
+
+        conn = sqlite3.connect(cache_db.DB_PATH)
+        try:
+            legacy_count = conn.execute("SELECT COUNT(*) FROM works").fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(legacy_count, 1)
+
+    def test_automated_multi_source_run_deduplicates_before_classification(self) -> None:
+        openalex = normalize_openalex_work(
+            {
+                "id": "https://openalex.org/W1",
+                "title": "Shared publication",
+                "publication_date": "2024-01-01",
+                "doi": "10.1234/shared",
+                "type": "article",
+                "abstract_inverted_index": {"Shared": [0], "abstract": [1]},
+                "authorships": [{"author": {"display_name": "Jane Doe"}, "institutions": []}],
+                "open_access": {"is_oa": True, "oa_status": "gold"},
+            }
+        )
+        dspace = normalize_dspace_object(
+            dspace_search_object(
+                item_id="item-1",
+                entity_type="Article",
+                title="Shared publication",
+                metadata={
+                    "dc.identifier.doi": metadata_entry("10.1234/shared"),
+                    "dc.contributor.author": metadata_entry("Doe, Jane"),
+                    "dc.date.issued": metadata_entry("2024"),
+                    "dc.abstract.en": metadata_entry("A longer shared repository abstract."),
+                    "dc.type": metadata_entry("JournalArticle"),
+                },
+            ),
+            DSpaceSource(
+                id="example",
+                label="Example Repository",
+                base_url="https://repo.example/server/api",
+                entity_types=("Article",),
+            ),
+        )
+        prediction = {
+            "predictions": [
+                {"sdg": {"code": "4", "name": "Quality Education"}, "prediction": 0.9}
+            ]
+        }
+        with (
+            patch.object(openalex_sdg, "fetch_openalex_records", return_value=([openalex], 1)),
+            patch.object(openalex_sdg, "fetch_dspace_records", return_value=([dspace], 1)),
+            patch.object(openalex_sdg, "classify_text_aurora", return_value=(prediction, "")) as classify,
+        ):
+            rows, stats = openalex_sdg.fetch_publications_with_sdg(
+                include_openalex=True,
+                dspace_sources=[
+                    DSpaceSource(
+                        id="example",
+                        label="Example Repository",
+                        base_url="https://repo.example/server/api",
+                        entity_types=("Article",),
+                    )
+                ],
+                institution_id="https://openalex.org/I1",
+                from_date="2023-01-01",
+                to_date="2026-08-31",
+                work_type="article",
+                model="aurora-sdg-multi",
+                enable_google_scholar=False,
+            )
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(stats.total_source_records, 2)
+            self.assertEqual(stats.duplicates_removed, 1)
+            self.assertEqual(rows[0]["source_count"], 2)
+            classify.assert_called_once()
+
+            classify.reset_mock()
+            second_rows, _ = openalex_sdg.fetch_publications_with_sdg(
+                include_openalex=True,
+                dspace_sources=[
+                    DSpaceSource(
+                        id="example",
+                        label="Example Repository",
+                        base_url="https://repo.example/server/api",
+                        entity_types=("Article",),
+                    )
+                ],
+                institution_id="https://openalex.org/I1",
+                from_date="2023-01-01",
+                to_date="2026-08-31",
+                work_type="article",
+                model="aurora-sdg-multi",
+                enable_google_scholar=False,
+            )
+            self.assertEqual(second_rows[0]["sdg_formatted"], "90% SDG 4 (Quality Education)")
+            classify.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()

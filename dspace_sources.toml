@@ -1,0 +1,10 @@
+# Public DSpace datasource registry. Add more [[dspace_sources]] tables as needed.
+# Credentials do not belong in this tracked file.
+
+[[dspace_sources]]
+id = "swps-share"
+label = "SWPS SHARE"
+base_url = "https://share.swps.edu.pl/server/api"
+configuration = "default"
+enabled = true
+entity_types = ["Article", "Book", "Artistic"]

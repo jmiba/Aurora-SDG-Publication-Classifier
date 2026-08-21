@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import re
 import time
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from html import unescape
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
@@ -24,6 +25,13 @@ from cache_db import (
     get_cached_work,
     upsert_sdg_result,
     upsert_work,
+)
+from publication_sources import (
+    DSpaceSource,
+    SourceFetchCancelled,
+    deduplicate_publications,
+    fetch_dspace_records,
+    fetch_openalex_records,
 )
 
 # ------------------ CONFIG ------------------
@@ -66,7 +74,11 @@ class FetchStats:
     openalex_abstract_missing: int
     ss_abstract_retrieved: int
     gs_abstract_retrieved: int
-    total_abstracts_available: int = 0 # New field
+    total_abstracts_available: int = 0
+    source_abstract_missing: int = 0
+    total_source_records: int = 0
+    duplicates_removed: int = 0
+    sources_queried: List[str] = field(default_factory=list)
 
 
 def too_short_for_model(model: str, text: str) -> bool:
@@ -542,7 +554,7 @@ def sanitize_filename(value: str) -> str:
     value = re.sub(r"[^\w\-\.]+", "_", value, flags=re.UNICODE)
     return value.strip("_")
 
-def fetch_works_with_sdg(
+def _fetch_works_with_sdg_legacy(
     institution_id: str,
     from_date: str,
     work_type: Optional[str],
@@ -767,6 +779,260 @@ def fetch_works_with_sdg(
     return rows, stats
 
 
+def _hash_classification_text(text: str) -> str:
+    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
+
+
+def fetch_publications_with_sdg(
+    *,
+    include_openalex: bool,
+    dspace_sources: Sequence[DSpaceSource],
+    institution_id: Optional[str],
+    from_date: str,
+    work_type: Optional[str],
+    model: str,
+    to_date: Optional[str] = None,
+    limit_rows: Optional[int] = None,
+    user_agent: str = DEFAULT_USER_AGENT,
+    semantic_scholar_api_key: Optional[str] = None,
+    enable_google_scholar: bool = True,
+    serpapi_api_key: Optional[str] = None,
+    extra_institution_ids: Optional[Sequence[str]] = None,
+    progress_callback: ProgressHook = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
+) -> Tuple[List[Dict[str, object]], FetchStats]:
+    """Fetch selected sources, deduplicate, then enrich and classify once per work."""
+    end_date = to_date or from_date
+    stats = FetchStats(
+        total_expected=None,
+        total_processed=0,
+        openalex_abstract_missing=0,
+        ss_abstract_retrieved=0,
+        gs_abstract_retrieved=0,
+    )
+    source_records: List[Dict[str, Any]] = []
+
+    def ensure_not_cancelled() -> None:
+        if cancel_check and cancel_check():
+            raise FetchCancelled()
+
+    def source_progress(message: str) -> None:
+        ensure_not_cancelled()
+        if progress_callback:
+            progress_callback(0, None, message)
+
+    with requests.Session() as session:
+        try:
+            if include_openalex:
+                if not institution_id:
+                    raise ValueError("institution_id is required when OpenAlex is selected")
+                stats.sources_queried.append("OpenAlex")
+                openalex_filter = make_filter(
+                    institution_id,
+                    from_date,
+                    work_type,
+                    end_date,
+                    extra_institution_ids=extra_institution_ids,
+                )
+                openalex_records, _ = fetch_openalex_records(
+                    session,
+                    filter_value=openalex_filter,
+                    work_type=work_type,
+                    user_agent=user_agent,
+                    limit_rows=limit_rows,
+                    progress_callback=source_progress,
+                    cancel_check=cancel_check,
+                )
+                source_records.extend(openalex_records)
+
+            for source in dspace_sources:
+                stats.sources_queried.append(source.label)
+                records, _ = fetch_dspace_records(
+                    session,
+                    source,
+                    from_date=from_date,
+                    to_date=end_date,
+                    work_type=work_type,
+                    user_agent=user_agent,
+                    limit_rows=limit_rows,
+                    progress_callback=source_progress,
+                    cancel_check=cancel_check,
+                )
+                source_records.extend(records)
+        except SourceFetchCancelled as exc:
+            raise FetchCancelled() from exc
+
+        ensure_not_cancelled()
+        stats.total_source_records = len(source_records)
+        publications = deduplicate_publications(source_records)
+        stats.duplicates_removed = len(source_records) - len(publications)
+        if limit_rows is not None:
+            publications = publications[:limit_rows]
+        stats.total_expected = len(publications)
+
+        rows: List[Dict[str, Any]] = []
+        for publication in publications:
+            ensure_not_cancelled()
+            publication_key = str(publication.get("publication_key") or "")
+            title = str(publication.get("title") or "")
+            authors_str = str(publication.get("authors") or "")
+            doi = str(publication.get("doi") or "")
+            cached_work = get_cached_work(publication_key) if publication_key else None
+            cached_abstract = (cached_work or {}).get("abstract") or ""
+            abstract_text = clean_html_fragment(str(publication.get("abstract") or ""))
+            source_abstract_missing = not bool(abstract_text)
+            if source_abstract_missing:
+                stats.source_abstract_missing += 1
+                if "openalex" in str(publication.get("source") or "").split("; "):
+                    stats.openalex_abstract_missing += 1
+                if cached_abstract:
+                    abstract_text = clean_html_fragment(cached_abstract)
+                elif doi:
+                    semantic_abstract = get_abstract_from_semantic_scholar(
+                        doi,
+                        session=session,
+                        api_key=semantic_scholar_api_key,
+                    )
+                    if semantic_abstract:
+                        abstract_text = clean_html_fragment(semantic_abstract)
+                        stats.ss_abstract_retrieved += 1
+            if enable_google_scholar and not abstract_text:
+                if serpapi_api_key:
+                    google_abstract = get_abstract_from_serpapi_google_scholar(
+                        title,
+                        authors_str,
+                        api_key=serpapi_api_key,
+                        session=session,
+                    )
+                else:
+                    google_abstract = get_abstract_from_scholarly(title, authors_str)
+                if google_abstract:
+                    abstract_text = clean_html_fragment(google_abstract)
+                    stats.gs_abstract_retrieved += 1
+
+            if abstract_text:
+                stats.total_abstracts_available += 1
+            abstract_updated = bool(
+                abstract_text and abstract_text != clean_html_fragment(cached_abstract)
+            )
+            text_for_sdg = abstract_text or title
+            text_hash = _hash_classification_text(text_for_sdg)
+            sdg_json: Optional[dict] = None
+            sdg_note = ""
+            sdg_formatted = ""
+            cached_sdg_entry: Optional[Dict[str, Any]] = None
+            reused_sdg = False
+
+            if model == "skip":
+                sdg_note = "skipped: user selected 'skip'"
+            elif too_short_for_model(model, text_for_sdg):
+                sdg_note = f"skipped: {model} requires >={MIN_WORDS_BY_MODEL[model]} words"
+            else:
+                cached_sdg_entry = get_cached_sdg_result(publication_key, model)
+                cached_hash = str((cached_sdg_entry or {}).get("text_hash") or "")
+                should_reuse = bool(cached_sdg_entry) and (
+                    cached_hash == text_hash or (not cached_hash and not abstract_updated)
+                )
+                if should_reuse:
+                    reused_sdg = True
+                    raw_json = cached_sdg_entry.get("sdg_response") or ""
+                    if raw_json:
+                        try:
+                            sdg_json = json.loads(raw_json)
+                        except json.JSONDecodeError:
+                            sdg_json = None
+                    sdg_formatted = cached_sdg_entry.get("sdg_formatted") or ""
+                    sdg_note = cached_sdg_entry.get("sdg_note") or ""
+                    if not sdg_formatted and sdg_json:
+                        sdg_formatted = format_sdg_predictions(sdg_json)
+                else:
+                    sdg_json, sdg_note = classify_text_aurora(
+                        model,
+                        text_for_sdg,
+                        session=session,
+                        user_agent=user_agent,
+                    )
+                    sdg_formatted = format_sdg_predictions(sdg_json) if sdg_json else ""
+                    # The canonical work must exist before its FK-bound SDG result.
+                    publication["abstract"] = abstract_text
+                    upsert_work(publication)
+                    upsert_sdg_result(
+                        publication_key=publication_key,
+                        model=model,
+                        sdg_response=sdg_json,
+                        sdg_formatted=sdg_formatted,
+                        sdg_note=sdg_note,
+                        text_hash=text_hash,
+                    )
+                    time.sleep(0.12)
+
+            sdg_raw = json.dumps(sdg_json, ensure_ascii=False) if sdg_json is not None else ""
+            if reused_sdg and not sdg_raw and cached_sdg_entry:
+                sdg_raw = cached_sdg_entry.get("sdg_response") or ""
+
+            row_data = {
+                key: value
+                for key, value in publication.items()
+                if not str(key).startswith("_")
+            }
+            row_data.update(
+                {
+                    "abstract": abstract_text,
+                    "sdg_model": model,
+                    "sdg_response": sdg_raw,
+                    "sdg_formatted": sdg_formatted,
+                    "sdg_note": sdg_note,
+                }
+            )
+            publication_for_cache = dict(row_data)
+            publication_for_cache["_source_records"] = publication.get("_source_records") or []
+            upsert_work(publication_for_cache)
+            rows.append(row_data)
+            stats.total_processed += 1
+            if progress_callback:
+                detail = title if len(title) <= 120 else f"{title[:117]}..."
+                progress_callback(stats.total_processed, stats.total_expected, detail)
+
+    if progress_callback:
+        progress_callback(stats.total_processed, stats.total_expected, "Completed")
+    return rows, stats
+
+
+def fetch_works_with_sdg(
+    institution_id: str,
+    from_date: str,
+    work_type: Optional[str],
+    model: str,
+    to_date: Optional[str] = None,
+    limit_rows: Optional[int] = None,
+    user_agent: str = DEFAULT_USER_AGENT,
+    semantic_scholar_api_key: Optional[str] = None,
+    enable_google_scholar: bool = True,
+    serpapi_api_key: Optional[str] = None,
+    extra_institution_ids: Optional[Sequence[str]] = None,
+    progress_callback: ProgressHook = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
+) -> Tuple[List[Dict[str, object]], FetchStats]:
+    """Backward-compatible OpenAlex-only wrapper around the multi-source pipeline."""
+    return fetch_publications_with_sdg(
+        include_openalex=True,
+        dspace_sources=[],
+        institution_id=institution_id,
+        from_date=from_date,
+        work_type=work_type,
+        model=model,
+        to_date=to_date,
+        limit_rows=limit_rows,
+        user_agent=user_agent,
+        semantic_scholar_api_key=semantic_scholar_api_key,
+        enable_google_scholar=enable_google_scholar,
+        serpapi_api_key=serpapi_api_key,
+        extra_institution_ids=extra_institution_ids,
+        progress_callback=progress_callback,
+        cancel_check=cancel_check,
+    )
+
+
 __all__ = [
     "AURORA_MODELS",
     "DEFAULT_FROM_DATE",
@@ -777,6 +1043,7 @@ __all__ = [
     "SEMANTIC_SCHOLAR_API",
     "SERPAPI_GS_API",
     "fetch_works_with_sdg",
+    "fetch_publications_with_sdg",
     "format_sdg_predictions",
     "is_openalex_institution_id",
     "is_ror_url",

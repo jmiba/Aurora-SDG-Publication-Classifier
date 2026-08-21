@@ -7,7 +7,7 @@ import json
 import networkx as nx
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 from xml.sax.saxutils import escape
 from zipfile import ZipFile, ZIP_DEFLATED
 
@@ -24,12 +24,13 @@ from openalex_sdg import (
     FetchCancelled,
     FetchStats,
     fetch_institution_lineage,
-    fetch_works_with_sdg,
+    fetch_publications_with_sdg,
     is_ror_url,
     is_openalex_institution_id,
     sanitize_filename,
     search_institutions_by_name,
 )
+from publication_sources import DSpaceSource, end_of_month, parse_dspace_sources
 
 SECRET_HTTP_USER_AGENT = "http_user_agent"
 SECRET_SEMANTIC_SCHOLAR_KEY = "semantic_scholar_api_key"
@@ -38,7 +39,8 @@ SECRET_DEFAULT_START = "advanced_options.default_from_date"
 SECRET_SERPAPI_KEY = "serpapi_api_key" # New constant for SerpApi Key
 _SECRETS: Dict[str, Any] = {}
 PREVIEW_COLUMNS = [
-    "openalex_id",
+    "record_url",
+    "source",
     "authors",
     "title",
     "publication_date",
@@ -48,6 +50,13 @@ PREVIEW_COLUMNS = [
 ]
 PREVIEW_PAGE_SIZE = 25
 CSV_FIELDNAMES = [
+    "publication_key",
+    "source",
+    "source_count",
+    "source_record_id",
+    "source_record_keys",
+    "record_url",
+    "record_urls",
     "openalex_id",
     "authors",
     "title",
@@ -66,10 +75,11 @@ CSV_FIELDNAMES = [
     "sdg_response",
     "sdg_formatted",
     "sdg_note",
+    "source_provenance_json",
 ]
 RESULT_SESSION_KEY = "fetch_result"
 SDG_THRESHOLD_PERCENT = 3.0
-OA_STATUS_ORDER = ["diamond", "gold", "hybrid", "green", "bronze", "closed"]
+OA_STATUS_ORDER = ["diamond", "gold", "hybrid", "green", "bronze", "open", "closed", "unknown"]
 OA_STATUS_COLORS = {
     "diamond": "#7dd3fc",
     "gold": "#facc15",
@@ -77,6 +87,8 @@ OA_STATUS_COLORS = {
     "green": "#22c55e",
     "bronze": "#cd7f32",
     "closed": "#6b7280",
+    "open": "#0c6b2f",
+    "unknown": "#94a3b8",
 }
 SDG_COLORS = {
     "1": "#e5243b",   # No Poverty
@@ -207,6 +219,23 @@ def resolve_serpapi_key() -> Optional[str]:
     return get_secret_text(SECRET_SERPAPI_KEY)
 
 
+def resolve_dspace_sources() -> List[DSpaceSource]:
+    """Load tracked public sources, with optional secrets-based additions/overrides."""
+    public_sources: List[DSpaceSource] = []
+    config_path = Path("dspace_sources.toml")
+    if config_path.is_file():
+        try:
+            with config_path.open("rb") as handle:
+                public_config = tomllib.load(handle)
+            public_sources = parse_dspace_sources(public_config.get("dspace_sources"))
+        except (OSError, tomllib.TOMLDecodeError):
+            public_sources = []
+    secret_sources = parse_dspace_sources(_load_secrets().get("dspace_sources"))
+    sources_by_id = {source.id: source for source in public_sources}
+    sources_by_id.update({source.id: source for source in secret_sources})
+    return list(sources_by_id.values())
+
+
 def build_preview_rows(
     rows: List[Dict[str, Any]],
     columns: List[str],
@@ -310,8 +339,8 @@ def render_sdg_pie_chart(data: List[Tuple[str, str, float]], title: str):
 
 
 def render_oa_ring_chart(rows: List[Dict[str, Any]]) -> None:
-    """Show a ring chart splitting publications by open access (True/False)."""
-    counts = {"Open access": 0, "Closed": 0}
+    """Show a ring chart without conflating missing OA metadata with closed access."""
+    counts = {"Open access": 0, "Closed": 0, "Unknown": 0}
     truthy = {"1", "true", "yes", "y", "t"}
     for row in rows:
         is_oa = row.get("is_oa")
@@ -319,10 +348,16 @@ def render_oa_ring_chart(rows: List[Dict[str, Any]]) -> None:
             counts["Open access" if is_oa else "Closed"] += 1
             continue
         if is_oa is None or is_oa == "":
-            counts["Closed"] += 1
+            counts["Unknown"] += 1
             continue
-        counts["Open access" if str(is_oa).strip().lower() in truthy else "Closed"] += 1
-    total = counts["Open access"] + counts["Closed"]
+        normalized = str(is_oa).strip().lower()
+        if normalized in truthy:
+            counts["Open access"] += 1
+        elif normalized in {"0", "false", "no", "n", "f"}:
+            counts["Closed"] += 1
+        else:
+            counts["Unknown"] += 1
+    total = sum(counts.values())
     if total == 0:
         st.info("No records contain an `is_oa` flag.")
         return
@@ -334,7 +369,7 @@ def render_oa_ring_chart(rows: List[Dict[str, Any]]) -> None:
         ]
     )
 
-    colors = {"Open access": "#0c6b2f", "Closed": "#6b7280"}
+    colors = {"Open access": "#0c6b2f", "Closed": "#6b7280", "Unknown": "#94a3b8"}
     chart = (
         alt.Chart(chart_df)
         .mark_arc(innerRadius=70)
@@ -652,26 +687,39 @@ def render_author_oa_chart(
         st.info("No author information is available to build this chart.")
         return
     if "is_oa" not in exploded.columns:
-        exploded["is_oa"] = False
-    exploded["is_oa"] = exploded["is_oa"].astype(bool)
+        exploded["oa_access_label"] = "Unknown"
+    else:
+        def oa_access_label(value: Any) -> str:
+            if isinstance(value, bool):
+                return "Open access" if value else "Closed"
+            if value is None or str(value).strip() == "":
+                return "Unknown"
+            normalized = str(value).strip().lower()
+            if normalized in {"1", "true", "yes", "y", "t"}:
+                return "Open access"
+            if normalized in {"0", "false", "no", "n", "f"}:
+                return "Closed"
+            return "Unknown"
+
+        exploded["oa_access_label"] = exploded["is_oa"].apply(oa_access_label)
     grouped = (
-        exploded.groupby(["author", "is_oa"], dropna=False)
+        exploded.groupby(["author", "oa_access_label"], dropna=False)
         .size()
         .reset_index(name="count")
     )
     if grouped.empty:
         st.info("No author publication counts available.")
         return
-    grouped["oa_status"] = grouped["is_oa"].map({True: "Open access", False: "Closed"})
+    grouped["oa_status"] = grouped["oa_access_label"]
     totals = grouped.groupby("author")["count"].sum().nlargest(max_authors)
     grouped = grouped[grouped["author"].isin(totals.index)]
     grouped["author"] = pd.Categorical(
         grouped["author"], categories=totals.index.tolist(), ordered=True
     )
-    ordered_statuses = ["Open access", "Closed"]
+    ordered_statuses = ["Open access", "Closed", "Unknown"]
     order_mapping = {status: idx for idx, status in enumerate(ordered_statuses)}
     grouped["status_order"] = grouped["oa_status"].map(order_mapping)
-    color_range = ["#0c6b2f", "#6b7280"]
+    color_range = ["#0c6b2f", "#6b7280", "#94a3b8"]
 
     chart = (
         alt.Chart(grouped)
@@ -880,7 +928,8 @@ def render_publication_type_chart(rows: List[Dict[str, Any]], start_date: str, e
     st.altair_chart(chart, width="stretch")
 
 def build_output_filename(
-    institution_id: str,
+    source_ids: Sequence[str],
+    institution_id: Optional[str],
     wtype: Optional[str],
     model: str,
     from_date: str,
@@ -888,10 +937,11 @@ def build_output_filename(
     limit_rows: Optional[int],
 ) -> str:
     """Generate a descriptive filename that encodes filters and limits."""
-    inst_tail = institution_id.rstrip("/").split("/")[-1]
+    source_part = "-".join(source_ids) or "publications"
+    inst_tail = institution_id.rstrip("/").split("/")[-1] if institution_id else "all"
     type_part = wtype or "all"
     model_part = model if model != "skip" else "no-sdg"
-    fname = f"openalex_{inst_tail}_{type_part}_{model_part}_{from_date}"
+    fname = f"{source_part}_{inst_tail}_{type_part}_{model_part}_{from_date}"
     if to_date and to_date != from_date:
         fname += f"_to{to_date}"
     if limit_rows:
@@ -1024,10 +1074,33 @@ def rows_to_excel_bytes(rows: List[Dict[str, Any]], columns: Optional[List[str]]
     return buffer.getvalue()
 
 
+def render_source_selector(
+    dspace_sources: Sequence[DSpaceSource],
+) -> Tuple[bool, List[DSpaceSource]]:
+    """Let one automated run query OpenAlex and any configured DSpace sources."""
+    st.header("Query setup", divider="rainbow")
+    st.subheader("1. Publication sources", divider="violet")
+    option_labels = {"openalex": "OpenAlex"}
+    option_labels.update({f"dspace:{source.id}": source.label for source in dspace_sources})
+    selected_keys = st.multiselect(
+        "Sources to query",
+        options=list(option_labels),
+        default=["openalex"],
+        format_func=lambda key: option_labels[key],
+        help="All selected sources are fetched automatically, normalized, and deduplicated before classification.",
+    )
+    selected_dspace_ids = {
+        key.split(":", 1)[1] for key in selected_keys if key.startswith("dspace:")
+    }
+    selected_dspace = [source for source in dspace_sources if source.id in selected_dspace_ids]
+    if not dspace_sources:
+        st.caption("No DSpace sources are configured; add `[[dspace_sources]]` entries to secrets.toml.")
+    return "openalex" in selected_keys, selected_dspace
+
+
 def render_institution_selector(user_agent: str) -> Tuple[Optional[str], bool]:
     """Show the institution search box, lineage toggle, and return (institution_id, include_lineage)."""
-    st.header("Query setup", divider="rainbow")
-    st.subheader("1. Institution", divider="violet")
+    st.subheader("2. OpenAlex institution", divider="violet")
 
     with st.form("institution_search_form", clear_on_submit=False):
         search_query = st.text_input(
@@ -1103,32 +1176,33 @@ def render_institution_selector(user_agent: str) -> Tuple[Optional[str], bool]:
     return st.session_state.get("selected_institution_id"), include_lineage
     
 
-def render_publication_type_selector() -> Optional[str]:
+def render_publication_type_selector(
+    include_openalex: bool,
+    include_dspace: bool,
+) -> Optional[str]:
     """Display the publication-type selectbox and return the chosen filter."""
-    st.subheader("2. Publication type", divider="blue")
-    types = [
-        "article",
-        "book",
-        "book-chapter",
-        "proceedings-article",
-        "proceedings",
-        "reference-entry",
-        "report",
-        "dissertation",
-        "dataset",
-        "review",
-        "editorial",
-        "letter",
-        "standard",
-        "other",
+    st.subheader("3. Publication type", divider="blue")
+    openalex_types = [
+        "article", "book", "book-chapter", "proceedings-article", "proceedings",
+        "reference-entry", "report", "dissertation", "dataset", "review",
+        "editorial", "letter", "standard", "other",
     ]
+    dspace_types = ["article", "book", "book-chapter", "artistic-work"]
+    types = list(
+        dict.fromkeys(
+            [
+                *(openalex_types if include_openalex else []),
+                *(dspace_types if include_dspace else []),
+            ]
+        )
+    )
     selected = st.selectbox("Filter by type", ["All"] + types)
     return None if selected == "All" else selected
 
 
 def render_model_selector() -> str:
     """Let the user pick which SDG classifier to run."""
-    st.subheader("3. SDG classifier", divider="green")
+    st.subheader("4. SDG classifier", divider="green")
     desc_only = [desc for _, desc in AURORA_MODELS]
     default_index = next((i for i, (name, _) in enumerate(AURORA_MODELS) if name == "aurora-sdg-multi"), 0)
     selection = st.selectbox("Choose a model", desc_only, index=default_index)
@@ -1140,7 +1214,7 @@ def render_advanced_options(
     default_from_secret: Optional[str],
 ) -> Tuple[str, str, Optional[int]]:
     """Render additional filters (date range, record limit, info callouts)."""
-    st.subheader("4. Advanced options", divider="yellow")
+    st.subheader("5. Advanced options", divider="yellow")
     today = datetime.today().date().replace(day=1)
     start_str = default_from_secret or "2023-01-01"
     try:
@@ -1180,14 +1254,15 @@ def render_advanced_options(
     if start_index > end_index:
         start_label, end_label = end_label, start_label
     from_date = label_to_date[start_label]
-    to_date = label_to_date[end_label]
+    selected_end_month = label_to_date[end_label]
+    to_date = end_of_month(selected_end_month)
     st.caption(f"Including works published from {from_date:%B %Y} through {to_date:%B %Y}.")
     limit_value = st.number_input(
-        "Limit to first N records (0 = no limit)",
+        "Limit to first N deduplicated publications (0 = no limit)",
         min_value=0,
         value=0,
         step=50,
-        help="Use to test the workflow without downloading everything.",
+        help="For multi-source tests, up to N records are fetched from each source and the final deduplicated result is capped at N.",
     )
     if not semantic_key_from_secret:
         st.info(
@@ -1217,7 +1292,7 @@ def main():
     st.set_page_config(page_title="Aurora SDG Publication Classifier", layout="wide")
     st.title("Aurora SDG Publication Classifier")
     st.caption(
-        "Fetch publications for an institution, relate them to the 17 UN Sustainable Development Goals (SDGs) using the [Aurora SDG classifier](https://aurora-universities.eu/sdg-research/classify/), and export a CSV ready for analysis."
+        "Fetch and deduplicate publications from OpenAlex and configured DSpace repositories, relate them to the 17 UN Sustainable Development Goals (SDGs) using the [Aurora SDG classifier](https://aurora-universities.eu/sdg-research/classify/), and export the results."
     )
 
     user_agent, has_user_agent_secret = resolve_user_agent()
@@ -1232,9 +1307,18 @@ def main():
             "for better API treatment."
         )
 
-    institution_id, include_lineage = render_institution_selector(user_agent)
+    configured_dspace_sources = resolve_dspace_sources()
+    include_openalex, selected_dspace_sources = render_source_selector(configured_dspace_sources)
+    if include_openalex:
+        institution_id, include_lineage = render_institution_selector(user_agent)
+    else:
+        institution_id, include_lineage = None, False
+        st.caption("OpenAlex is not selected, so no OpenAlex institution is required.")
     st.write("")
-    publication_type = render_publication_type_selector()
+    publication_type = render_publication_type_selector(
+        include_openalex,
+        bool(selected_dspace_sources),
+    )
     st.write("")
     model = render_model_selector()
     st.write("")
@@ -1247,11 +1331,17 @@ def main():
         default_from_date,
     )
 
-    if not institution_id:
+    if not include_openalex and not selected_dspace_sources:
+        st.info("Select at least one publication source to continue.")
+        return
+
+    if include_openalex and not institution_id:
         st.info("Pick an institution or paste a ROR/OpenAlex institution ID/URL to continue.")
         return
 
-    if not (is_ror_url(institution_id) or is_openalex_institution_id(institution_id)):
+    if include_openalex and institution_id and not (
+        is_ror_url(institution_id) or is_openalex_institution_id(institution_id)
+    ):
         st.error("Institution must be a valid ROR URL or OpenAlex institution URL (e.g., https://openalex.org/I123456789).")
         return
     
@@ -1268,6 +1358,10 @@ def main():
             )
 
     current_params = {
+        "sources": [
+            *(["openalex"] if include_openalex else []),
+            *[source.id for source in selected_dspace_sources],
+        ],
         "institution": institution_id,
         "type": publication_type,
         "model": model,
@@ -1329,13 +1423,14 @@ def main():
             progress_text.text(status)
 
         lineage_ids: List[str] = []
-        if include_lineage:
+        if include_openalex and include_lineage and institution_id:
             cached_meta = st.session_state.get("selected_institution_meta") or {}
             lineage_ids = [str(val) for val in cached_meta.get("lineage") or [] if val]
             if not lineage_ids:
                 lineage_ids = fetch_institution_lineage(institution_id, user_agent=user_agent)
 
         filename = build_output_filename(
+            current_params["sources"],
             institution_id,
             publication_type,
             model,
@@ -1347,9 +1442,11 @@ def main():
         def cancel_check() -> bool:
             return bool(st.session_state.get("fetch_cancel_requested"))
 
-        with st.spinner("Contacting OpenAlex and Aurora APIs…"):
+        with st.spinner("Fetching selected sources and contacting Aurora as needed…"):
             try:
-                rows, stats = fetch_works_with_sdg(
+                rows, stats = fetch_publications_with_sdg(
+                    include_openalex=include_openalex,
+                    dspace_sources=selected_dspace_sources,
                     institution_id=institution_id,
                     from_date=from_date_str,
                     work_type=publication_type,
@@ -1375,6 +1472,10 @@ def main():
             except requests.RequestException as exc:
                 _reset_fetch_state(progress_bar, progress_text, progress_detail, cancel_button_placeholder) # Use new placeholder
                 st.error(f"Network error: {exc}")
+                return
+            except ValueError as exc:
+                _reset_fetch_state(progress_bar, progress_text, progress_detail, cancel_button_placeholder)
+                st.error(f"Source configuration or response error: {exc}")
                 return
 
         _reset_fetch_state(progress_bar, progress_text, progress_detail, cancel_button_placeholder) # Use new placeholder
@@ -1406,9 +1507,12 @@ def main():
         else "."
     )
     st.success(
-        f"Wrote **{stats.total_processed:,}** rows. "
-        f"Abstracts available: **{stats.total_abstracts_available:,}**. " # New line
-        f"OpenAlex missing abstracts: **{stats.openalex_abstract_missing:,}**; "
+        f"Fetched **{stats.total_source_records:,}** source records from "
+        f"**{', '.join(stats.sources_queried)}** and wrote "
+        f"**{stats.total_processed:,}** deduplicated rows "
+        f"(**{stats.duplicates_removed:,}** duplicates merged). "
+        f"Abstracts available: **{stats.total_abstracts_available:,}**; "
+        f"canonical publications missing abstracts before enrichment: **{stats.source_abstract_missing:,}**; "
         f"retrieved from Semantic Scholar: **{stats.ss_abstract_retrieved:,}**"
         f"{gs_note}"
     )
@@ -1470,11 +1574,11 @@ def main():
                 column_configs[column] = st.column_config.NumberColumn(
                     "#", help="Row number in this page", width="small"
                 )
-            elif column == "openalex_id":
+            elif column == "record_url":
                 column_configs[column] = st.column_config.LinkColumn(
-                    "OpenAlex ID",
-                    help="Open the work in OpenAlex",
-                    display_text=r"(?:https?://openalex\.org/)?(.+)",
+                    "Source record",
+                    help="Open the publication in its source repository",
+                    display_text=r"https?://(?:www\.)?([^/]+)/.*",
                 )
             elif column.lower() == "doi":
                 column_configs[column] = st.column_config.LinkColumn(
