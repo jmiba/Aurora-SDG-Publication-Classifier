@@ -11,7 +11,7 @@ import unicodedata
 from dataclasses import dataclass
 from datetime import date
 from html import unescape
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
 from urllib.parse import urlparse
 
 import requests
@@ -44,6 +44,8 @@ class DSpaceSource:
     configuration: str = "default"
     scope: Optional[str] = None
     entity_types: Tuple[str, ...] = ("Article", "Book", "Artistic")
+    openalex_institution_id: Optional[str] = None
+    ror_id: Optional[str] = None
 
     @property
     def search_url(self) -> str:
@@ -52,6 +54,28 @@ class DSpaceSource:
     @property
     def public_base_url(self) -> str:
         return re.sub(r"/server/api/?$", "", self.base_url.rstrip("/"))
+
+    @property
+    def openalex_query_id(self) -> Optional[str]:
+        """Return the preferred identifier for querying this institution in OpenAlex."""
+        return self.openalex_institution_id or self.ror_id
+
+
+WorkTypeSelection = Optional[Union[str, Sequence[str]]]
+
+
+def _valid_openalex_institution_id(value: Any) -> Optional[str]:
+    text = str(value or "").strip()
+    if re.fullmatch(r"(?:https?://openalex\.org/)?I[A-Z0-9]+", text, flags=re.I):
+        return text
+    return None
+
+
+def _valid_ror_id(value: Any) -> Optional[str]:
+    text = str(value or "").strip()
+    if re.fullmatch(r"https?://ror\.org/[0-9a-z]{9}", text, flags=re.I):
+        return text
+    return None
 
 
 def parse_dspace_sources(raw_sources: Any) -> List[DSpaceSource]:
@@ -98,6 +122,10 @@ def parse_dspace_sources(raw_sources: Any) -> List[DSpaceSource]:
                 configuration=str(values.get("configuration") or "default").strip(),
                 scope=str(values.get("scope") or "").strip() or None,
                 entity_types=entity_types or ("Article", "Book", "Artistic"),
+                openalex_institution_id=_valid_openalex_institution_id(
+                    values.get("openalex_institution_id")
+                ),
+                ror_id=_valid_ror_id(values.get("ror_id")),
             )
         )
         seen_ids.add(source_id)
@@ -402,14 +430,15 @@ def fetch_openalex_records(
     session: requests.Session,
     *,
     filter_value: str,
-    work_type: Optional[str],
+    work_type: WorkTypeSelection,
     user_agent: str,
     limit_rows: Optional[int] = None,
     progress_callback: DSpaceProgressHook = None,
     cancel_check: CancelCheck = None,
 ) -> Tuple[List[Dict[str, Any]], Optional[int]]:
     """Fetch and normalize OpenAlex records without enrichment or classification."""
-    if work_type == "artistic-work":
+    selected_types = _selected_work_types(work_type)
+    if selected_types == ("artistic-work",):
         return [], 0
     params: Dict[str, Any] = {
         "filter": filter_value,
@@ -442,18 +471,32 @@ def fetch_openalex_records(
     return records, total_expected
 
 
-def _entity_types_for_work_type(source: DSpaceSource, work_type: Optional[str]) -> Tuple[str, ...]:
+def _selected_work_types(work_type: WorkTypeSelection) -> Tuple[str, ...]:
     if not work_type:
+        return ()
+    if isinstance(work_type, str):
+        return (work_type,)
+    return tuple(dict.fromkeys(str(value).strip() for value in work_type if str(value).strip()))
+
+
+def _entity_types_for_work_type(source: DSpaceSource, work_type: WorkTypeSelection) -> Tuple[str, ...]:
+    selected_types = _selected_work_types(work_type)
+    if not selected_types:
         return source.entity_types
-    desired = {
+    mappings = {
         "article": "Article",
         "book": "Book",
         "book-chapter": "Book",
         "artistic-work": "Artistic",
-    }.get(work_type)
-    if desired and desired in source.entity_types:
-        return (desired,)
-    return ()
+    }
+    desired = {mappings.get(value, value) for value in selected_types}
+    return tuple(
+        entity_type
+        for entity_type in source.entity_types
+        if entity_type in desired
+        or re.sub(r"[^a-z0-9]+", "-", entity_type.lower()).strip("-")
+        in selected_types
+    )
 
 
 def fetch_dspace_records(
@@ -462,7 +505,7 @@ def fetch_dspace_records(
     *,
     from_date: str,
     to_date: str,
-    work_type: Optional[str],
+    work_type: WorkTypeSelection,
     user_agent: str,
     limit_rows: Optional[int] = None,
     page_size: int = 100,
@@ -472,6 +515,7 @@ def fetch_dspace_records(
     """Fetch one DSpace source page-by-page, without media or bitstream embeds."""
     records: List[Dict[str, Any]] = []
     total_expected = 0
+    selected_types = set(_selected_work_types(work_type))
     headers = {"User-Agent": user_agent, "Accept": "application/hal+json, application/json"}
     for entity_type in _entity_types_for_work_type(source, work_type):
         page = 0
@@ -501,7 +545,7 @@ def fetch_dspace_records(
                 normalized = normalize_dspace_object(search_object, source)
                 if not normalized:
                     continue
-                if work_type and normalized.get("type") != work_type:
+                if selected_types and normalized.get("type") not in selected_types:
                     continue
                 records.append(normalized)
                 entity_record_count += 1

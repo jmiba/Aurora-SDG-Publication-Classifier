@@ -29,6 +29,7 @@ from cache_db import (
 from publication_sources import (
     DSpaceSource,
     SourceFetchCancelled,
+    WorkTypeSelection,
     deduplicate_publications,
     fetch_dspace_records,
     fetch_openalex_records,
@@ -355,7 +356,7 @@ def abbreviate_authors(value: str) -> str:
 def make_filter(
     institution_id: str,
     from_date: Optional[str],
-    work_type: Optional[str],
+    work_type: WorkTypeSelection,
     to_date: Optional[str] = None,
     extra_institution_ids: Optional[Sequence[str]] = None,
 ) -> str:
@@ -369,14 +370,14 @@ def make_filter(
     for inst in inst_ids:
         if is_openalex_institution_id(inst):
             ids.append(inst.split("/")[-1])
-        else:
+        elif is_ror_url(inst):
             rors.append(inst)
     if ids:
         inst_filter = f"institutions.id:{'|'.join(ids)}"
     elif rors:
         inst_filter = f"institutions.ror:{'|'.join(rors)}"
     else:
-        inst_filter = ""
+        raise ValueError("At least one valid OpenAlex institution or ROR ID is required")
     parts = [
         inst_filter,
         "is_paratext:false",
@@ -386,7 +387,12 @@ def make_filter(
     if to_date:
         parts.append(f"to_publication_date:{to_date}")
     if work_type:
-        parts.append(f"type:{work_type}")
+        selected_types = [work_type] if isinstance(work_type, str) else list(work_type)
+        selected_types = list(
+            dict.fromkeys(str(value).strip() for value in selected_types if str(value).strip())
+        )
+        if selected_types:
+            parts.append(f"type:{'|'.join(selected_types)}")
     return ",".join(parts)
 
 def classify_text_aurora(
@@ -814,7 +820,7 @@ def fetch_publications_with_sdg(
     dspace_sources: Sequence[DSpaceSource],
     institution_id: Optional[str],
     from_date: str,
-    work_type: Optional[str],
+    work_type: WorkTypeSelection,
     model: str,
     to_date: Optional[str] = None,
     limit_rows: Optional[int] = None,
@@ -851,24 +857,49 @@ def fetch_publications_with_sdg(
             if include_openalex:
                 if not institution_id:
                     raise ValueError("institution_id is required when OpenAlex is selected")
-                stats.sources_queried.append("OpenAlex")
-                openalex_filter = make_filter(
-                    institution_id,
-                    from_date,
-                    work_type,
-                    end_date,
-                    extra_institution_ids=extra_institution_ids,
+                selected_types = (
+                    [work_type]
+                    if isinstance(work_type, str)
+                    else list(work_type or [])
                 )
-                openalex_records, _ = fetch_openalex_records(
-                    session,
-                    filter_value=openalex_filter,
-                    work_type=work_type,
-                    user_agent=user_agent,
-                    limit_rows=limit_rows,
-                    progress_callback=source_progress,
-                    cancel_check=cancel_check,
-                )
-                source_records.extend(openalex_records)
+                openalex_types = [
+                    value for value in selected_types if value != "artistic-work"
+                ]
+                if not selected_types or openalex_types:
+                    stats.sources_queried.append("OpenAlex")
+                    institution_ids = [institution_id, *(extra_institution_ids or [])]
+                    openalex_ids = list(
+                        dict.fromkeys(
+                            value
+                            for value in institution_ids
+                            if is_openalex_institution_id(value)
+                        )
+                    )
+                    ror_ids = list(
+                        dict.fromkeys(
+                            value for value in institution_ids if is_ror_url(value)
+                        )
+                    )
+                    for identifier_group in (openalex_ids, ror_ids):
+                        if not identifier_group:
+                            continue
+                        openalex_filter = make_filter(
+                            identifier_group[0],
+                            from_date,
+                            openalex_types or None,
+                            end_date,
+                            extra_institution_ids=identifier_group[1:],
+                        )
+                        openalex_records, _ = fetch_openalex_records(
+                            session,
+                            filter_value=openalex_filter,
+                            work_type=openalex_types or None,
+                            user_agent=user_agent,
+                            limit_rows=limit_rows,
+                            progress_callback=source_progress,
+                            cancel_check=cancel_check,
+                        )
+                        source_records.extend(openalex_records)
 
             for source in dspace_sources:
                 stats.sources_queried.append(source.label)

@@ -78,7 +78,7 @@ CSV_FIELDNAMES = [
     "source_provenance_json",
 ]
 RESULT_SESSION_KEY = "fetch_result"
-RESULT_SCHEMA_VERSION = 2
+RESULT_SCHEMA_VERSION = 3
 SDG_THRESHOLD_PERCENT = 3.0
 OA_STATUS_ORDER = ["diamond", "gold", "hybrid", "green", "bronze", "open", "closed", "unknown"]
 OA_STATUS_COLORS = {
@@ -933,7 +933,7 @@ def render_publication_type_chart(rows: List[Dict[str, Any]], start_date: str, e
 def build_output_filename(
     source_ids: Sequence[str],
     institution_id: Optional[str],
-    wtype: Optional[str],
+    work_types: Optional[Sequence[str]],
     model: str,
     from_date: str,
     to_date: Optional[str],
@@ -942,7 +942,7 @@ def build_output_filename(
     """Generate a descriptive filename that encodes filters and limits."""
     source_part = "-".join(source_ids) or "publications"
     inst_tail = institution_id.rstrip("/").split("/")[-1] if institution_id else "all"
-    type_part = wtype or "all"
+    type_part = "-".join(work_types or []) or "all"
     model_part = model if model != "skip" else "no-sdg"
     fname = f"{source_part}_{inst_tail}_{type_part}_{model_part}_{from_date}"
     if to_date and to_date != from_date:
@@ -1177,30 +1177,94 @@ def render_institution_selector(user_agent: str) -> Tuple[Optional[str], bool]:
     )
     st.session_state["include_lineage"] = include_lineage
     return st.session_state.get("selected_institution_id"), include_lineage
-    
+
+
+def render_configured_institution_selector(
+    dspace_sources: Sequence[DSpaceSource],
+) -> Tuple[List[str], bool]:
+    """Use institution identifiers attached to the selected DSpace sources."""
+    st.subheader("2. OpenAlex institutions", divider="violet")
+    institution_ids: List[str] = []
+    missing_labels: List[str] = []
+    for source in dspace_sources:
+        query_id = source.openalex_query_id
+        if not query_id:
+            missing_labels.append(source.label)
+            continue
+        if query_id not in institution_ids:
+            institution_ids.append(query_id)
+        identifiers = [
+            value
+            for value in (source.openalex_institution_id, source.ror_id)
+            if value
+        ]
+        st.caption(f"{source.label}: {' · '.join(identifiers)}")
+
+    if missing_labels:
+        st.warning(
+            "No OpenAlex/ROR institution is configured for: "
+            + ", ".join(missing_labels)
+            + ". OpenAlex will only query the linked institutions."
+        )
+    include_lineage = st.checkbox(
+        "Include works from parent/child institutions (OpenAlex lineage)",
+        value=st.session_state.get("include_lineage", False),
+        help="If enabled, works from related institutions in each configured OpenAlex lineage are included.",
+        key="include_lineage_checkbox",
+    )
+    st.session_state["include_lineage"] = include_lineage
+    return institution_ids, include_lineage
+
 
 def render_publication_type_selector(
     include_openalex: bool,
-    include_dspace: bool,
-) -> Optional[str]:
-    """Display the publication-type selectbox and return the chosen filter."""
-    st.subheader("3. Publication type", divider="blue")
+    dspace_sources: Sequence[DSpaceSource],
+) -> List[str]:
+    """Display all publication types supported by the selected sources."""
+    st.subheader("3. Publication types", divider="blue")
     openalex_types = [
         "article", "book", "book-chapter", "proceedings-article", "proceedings",
         "reference-entry", "report", "dissertation", "dataset", "review",
         "editorial", "letter", "standard", "other",
     ]
-    dspace_types = ["article", "book", "book-chapter", "artistic-work"]
+    entity_type_mappings = {
+        "article": ["article"],
+        "book": ["book", "book-chapter"],
+        "artistic": ["artistic-work"],
+    }
+    dspace_types: List[str] = []
+    for source in dspace_sources:
+        for entity_type in source.entity_types:
+            normalized = re.sub(r"[^a-z0-9]+", "-", entity_type.lower()).strip("-")
+            for work_type in entity_type_mappings.get(normalized, [normalized]):
+                if work_type and work_type not in dspace_types:
+                    dspace_types.append(work_type)
     types = list(
         dict.fromkeys(
             [
                 *(openalex_types if include_openalex else []),
-                *(dspace_types if include_dspace else []),
+                *dspace_types,
             ]
         )
     )
-    selected = st.selectbox("Filter by type", ["All"] + types)
-    return None if selected == "All" else selected
+    labels = {
+        "article": "Articles",
+        "book": "Monographs / books",
+        "book-chapter": "Book chapters",
+        "artistic-work": "Artistic works",
+        "proceedings-article": "Proceedings articles",
+        "reference-entry": "Reference entries",
+    }
+    return st.multiselect(
+        "Publication types to include",
+        options=types,
+        default=types,
+        format_func=lambda value: labels.get(value, value.replace("-", " ").title()),
+        help=(
+            "Choose one or more types. For DSpace, monographs and book chapters share "
+            "one Book API query and are separated using dc.type metadata."
+        ),
+    )
 
 
 def render_model_selector() -> str:
@@ -1324,16 +1388,42 @@ def main():
         )
 
     configured_dspace_sources = resolve_dspace_sources()
+    if any(
+        not hasattr(source, "openalex_query_id")
+        for source in configured_dspace_sources
+    ):
+        st.error(
+            "The DSpace source model changed while Streamlit was running. "
+            "Stop the current process and restart it so all application modules are reloaded."
+        )
+        st.code("source .venv/bin/activate\nstreamlit run app.py", language="bash")
+        return
     include_openalex, selected_dspace_sources = render_source_selector(configured_dspace_sources)
+    openalex_institution_ids: List[str] = []
+    using_configured_institutions = False
     if include_openalex:
-        institution_id, include_lineage = render_institution_selector(user_agent)
+        configured_ids = [
+            source.openalex_query_id
+            for source in selected_dspace_sources
+            if source.openalex_query_id
+        ]
+        if configured_ids:
+            using_configured_institutions = True
+            openalex_institution_ids, include_lineage = render_configured_institution_selector(
+                selected_dspace_sources
+            )
+            institution_id = openalex_institution_ids[0]
+        else:
+            institution_id, include_lineage = render_institution_selector(user_agent)
+            if institution_id:
+                openalex_institution_ids = [institution_id]
     else:
         institution_id, include_lineage = None, False
         st.caption("OpenAlex is not selected, so no OpenAlex institution is required.")
     st.write("")
-    publication_type = render_publication_type_selector(
+    publication_types = render_publication_type_selector(
         include_openalex,
-        bool(selected_dspace_sources),
+        selected_dspace_sources,
     )
     st.write("")
     model = render_model_selector()
@@ -1351,14 +1441,19 @@ def main():
         st.info("Select at least one publication source to continue.")
         return
 
-    if include_openalex and not institution_id:
+    if include_openalex and not openalex_institution_ids:
         st.info("Pick an institution or paste a ROR/OpenAlex institution ID/URL to continue.")
         return
 
-    if include_openalex and institution_id and not (
-        is_ror_url(institution_id) or is_openalex_institution_id(institution_id)
+    if include_openalex and any(
+        not (is_ror_url(value) or is_openalex_institution_id(value))
+        for value in openalex_institution_ids
     ):
         st.error("Institution must be a valid ROR URL or OpenAlex institution URL (e.g., https://openalex.org/I123456789).")
+        return
+
+    if not publication_types:
+        st.info("Select at least one publication type to continue.")
         return
     
     st.write("")
@@ -1378,8 +1473,8 @@ def main():
             *(["openalex"] if include_openalex else []),
             *[source.id for source in selected_dspace_sources],
         ],
-        "institution": institution_id,
-        "type": publication_type,
+        "institutions": openalex_institution_ids,
+        "types": publication_types,
         "model": model,
         "from": from_date_str,
         "to": to_date_str,
@@ -1449,17 +1544,29 @@ def main():
                 progress_detail.empty()
             progress_text.text(status)
 
-        lineage_ids: List[str] = []
-        if include_openalex and include_lineage and institution_id:
-            cached_meta = st.session_state.get("selected_institution_meta") or {}
-            lineage_ids = [str(val) for val in cached_meta.get("lineage") or [] if val]
-            if not lineage_ids:
-                lineage_ids = fetch_institution_lineage(institution_id, user_agent=user_agent)
+        extra_institution_ids: List[str] = list(openalex_institution_ids[1:])
+        if include_openalex and include_lineage:
+            cached_meta = (
+                {}
+                if using_configured_institutions
+                else st.session_state.get("selected_institution_meta") or {}
+            )
+            cached_lineage = [str(val) for val in cached_meta.get("lineage") or [] if val]
+            for index, configured_id in enumerate(openalex_institution_ids):
+                lineage_ids = cached_lineage if index == 0 and cached_lineage else []
+                if not lineage_ids:
+                    lineage_ids = fetch_institution_lineage(
+                        configured_id,
+                        user_agent=user_agent,
+                    )
+                for lineage_id in lineage_ids:
+                    if lineage_id not in openalex_institution_ids and lineage_id not in extra_institution_ids:
+                        extra_institution_ids.append(lineage_id)
 
         filename = build_output_filename(
             current_params["sources"],
             institution_id,
-            publication_type,
+            publication_types,
             model,
             from_date_str,
             to_date_str,
@@ -1476,7 +1583,7 @@ def main():
                     dspace_sources=selected_dspace_sources,
                     institution_id=institution_id,
                     from_date=from_date_str,
-                    work_type=publication_type,
+                    work_type=publication_types,
                     model=model,
                     to_date=to_date_str,
                     limit_rows=limit_rows,
@@ -1484,7 +1591,7 @@ def main():
                     semantic_scholar_api_key=semantic_scholar_key,
                     enable_google_scholar=google_scholar_enabled,
                     serpapi_api_key=serpapi_api_key, # Pass SerpApi key
-                    extra_institution_ids=lineage_ids if include_lineage else None,
+                    extra_institution_ids=extra_institution_ids or None,
                     progress_callback=progress_callback,
                     cancel_check=cancel_check,
                 )

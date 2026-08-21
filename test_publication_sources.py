@@ -95,6 +95,8 @@ class PublicationSourceTests(unittest.TestCase):
                     "label": "Source One",
                     "base_url": "https://one.example/server/api",
                     "entity_types": ["Article"],
+                    "openalex_institution_id": "https://openalex.org/I123456",
+                    "ror_id": "https://ror.org/012345678",
                 },
                 {
                     "id": "source-two",
@@ -111,6 +113,26 @@ class PublicationSourceTests(unittest.TestCase):
         )
         self.assertEqual([source.id for source in sources], ["source-one", "source-two"])
         self.assertEqual(sources[0].entity_types, ("Article",))
+        self.assertEqual(
+            sources[0].openalex_institution_id,
+            "https://openalex.org/I123456",
+        )
+        self.assertEqual(sources[0].ror_id, "https://ror.org/012345678")
+        self.assertEqual(sources[0].openalex_query_id, "https://openalex.org/I123456")
+
+    def test_invalid_institution_identifiers_are_not_loaded(self) -> None:
+        source = parse_dspace_sources(
+            {
+                "id": "invalid-identifiers",
+                "base_url": "https://repo.example/server/api",
+                "openalex_institution_id": "not-an-openalex-id",
+                "ror_id": "not-a-ror-id",
+            }
+        )[0]
+
+        self.assertIsNone(source.openalex_institution_id)
+        self.assertIsNone(source.ror_id)
+        self.assertIsNone(source.openalex_query_id)
 
     def test_normalize_article_without_exposing_artwork_or_thumbnail_media(self) -> None:
         record = dspace_search_object(
@@ -370,6 +392,87 @@ class PublicationSourceTests(unittest.TestCase):
             [call["params"]["f.entityType"] for call in session.calls],
             ["Article,equals", "Book,equals", "Artistic,equals"],
         )
+
+    def test_book_and_chapter_selection_uses_one_dspace_book_query(self) -> None:
+        payload = {
+            "_embedded": {
+                "searchResult": {
+                    "page": {
+                        "number": 0,
+                        "size": 100,
+                        "totalPages": 1,
+                        "totalElements": 2,
+                    },
+                    "_embedded": {
+                        "objects": [
+                            dspace_search_object(
+                                item_id="book",
+                                entity_type="Book",
+                                title="A monograph",
+                                metadata={"dc.type": metadata_entry("Monography")},
+                            ),
+                            dspace_search_object(
+                                item_id="chapter",
+                                entity_type="Book",
+                                title="A chapter",
+                                metadata={"dc.type": metadata_entry("MonographyChapter")},
+                            ),
+                        ]
+                    },
+                }
+            }
+        }
+        session = FakeSession([payload])
+
+        records, _ = fetch_dspace_records(
+            session,
+            self.source,
+            from_date="2023-01-01",
+            to_date="2026-08-31",
+            work_type=["book", "book-chapter"],
+            user_agent="test-agent",
+        )
+
+        self.assertEqual({record["type"] for record in records}, {"book", "book-chapter"})
+        self.assertEqual(len(session.calls), 1)
+        self.assertEqual(session.calls[0]["params"]["f.entityType"], "Book,equals")
+
+    def test_openalex_filter_combines_selected_types_with_or(self) -> None:
+        filter_value = openalex_sdg.make_filter(
+            "https://openalex.org/I123",
+            "2023-01-01",
+            ["article", "book", "book-chapter"],
+            "2026-08-31",
+        )
+
+        self.assertIn("institutions.id:I123", filter_value)
+        self.assertIn("type:article|book|book-chapter", filter_value)
+
+    def test_mixed_openalex_and_ror_institutions_use_separate_queries(self) -> None:
+        with patch.object(
+            openalex_sdg,
+            "fetch_openalex_records",
+            return_value=([], 0),
+        ) as fetch_openalex:
+            _, stats = openalex_sdg.fetch_publications_with_sdg(
+                include_openalex=True,
+                dspace_sources=[],
+                institution_id="https://openalex.org/I123",
+                extra_institution_ids=["https://ror.org/012345678"],
+                from_date="2023-01-01",
+                to_date="2026-08-31",
+                work_type=["article", "book"],
+                model="skip",
+                enable_google_scholar=False,
+            )
+
+        self.assertEqual(fetch_openalex.call_count, 2)
+        filters = [call.kwargs["filter_value"] for call in fetch_openalex.call_args_list]
+        self.assertTrue(any("institutions.id:I123" in value for value in filters))
+        self.assertTrue(
+            any("institutions.ror:https://ror.org/012345678" in value for value in filters)
+        )
+        self.assertEqual(stats.sources_queried, ["OpenAlex"])
 
     def test_end_of_month_including_leap_year(self) -> None:
         self.assertEqual(end_of_month(date(2024, 2, 1)), date(2024, 2, 29))

@@ -5,9 +5,9 @@ This Streamlit app explores publications from OpenAlex and any number of configu
 ## What you can do
 
 - **Select one or more sources**: Query OpenAlex, configured DSpace repositories, or both in one automated run.
-- **Search OpenAlex institutions**: When OpenAlex is selected, search its institution registry or paste a ROR/OpenAlex institution URL.
+- **Link repositories to OpenAlex**: A DSpace source can carry its OpenAlex and ROR institution IDs. When OpenAlex and that repository are selected together, the configured institution is used automatically. For an OpenAlex-only query, search the institution registry or paste an ID as before.
 - **Use generic DSpace sources**: Configure public DSpace REST APIs through repeatable `[[dspace_sources]]` entries. SWPS SHARE is the initial registry entry, not a special code path.
-- **Set filters**: Choose publication types, SDG classifier models, time windows, and optional record limits. Limited multi-source results are selected newest-first after deduplication rather than by source order.
+- **Set filters**: Select one or more publication types, an SDG classifier model, a time window, and an optional record limit. Limited multi-source results are selected newest-first after deduplication rather than by source order.
 - **Deduplicate automatically**: Exact normalized DOI matches, or exact normalized title/year/first-author matches, are merged before enrichment and classification.
 - **Fetch SDG predictions**: Canonical publications and classifications are cached locally in `cache.sqlite3` to avoid redundant Aurora calls.
 - **Enrich abstracts**: If all selected source records lack an abstract, the app can fall back to Semantic Scholar and Google Scholar.
@@ -62,7 +62,7 @@ flowchart TB
 
 ## How it works in the background
 
-1. **Source fetch**: OpenAlex uses the selected institution, lineage, date and publication type. Each selected DSpace API is queried independently with its configured Discovery profile, scope and entity types. When a record limit is set, each DSpace entity category contributes candidates before the global newest-first limit is applied. DSpace pages use metadata-only search results; media endpoints are never followed.
+1. **Source fetch**: OpenAlex uses either the manually selected institution or the institution IDs linked to the selected DSpace repositories, plus the lineage, date and selected publication types. Each selected DSpace API is queried independently with its configured Discovery profile, scope and applicable entity types. DSpace `Book` is queried only once when monographs, book chapters, or both are selected; `dc.type` metadata separates the returned records locally. When a record limit is set, each DSpace entity category contributes candidates before the global newest-first limit is applied. DSpace pages use metadata-only search results; media endpoints are never followed.
 2. **Normalization and deduplication**: Source-qualified record IDs remain preserved while exact DOI or exact title/year/first-author matches become one canonical publication. Fuzzy similarity is not used for automatic merging.
 3. **Caching**: `source_records` preserves raw source responses, `canonical_works` stores merged publications, and `sdg_results_v2` stores classifications with the hash of the classified text. Cache updates preserve accumulated provenance and richer abstracts when a later query uses fewer sources. The legacy `works` and `sdg_results` tables remain intact and are copied additively on first use.
 4. **SDG classification**: Depending on the model, the selected abstract or title is sent to Aurora once per canonical publication. An unchanged text hash reuses the previous result.
@@ -101,7 +101,7 @@ flowchart TB
    ```bash
    streamlit run app.py
    ```
-6. **Use the interface**: Select one or more sources. If OpenAlex is selected, also select an institution. Then choose the remaining options and press “Fetch works and build CSV.” Retrieval, deduplication and classification happen automatically.
+6. **Use the interface**: Select one or more sources and one or more publication types. If OpenAlex is selected with a linked DSpace source, its configured institution is shown and used automatically. For an OpenAlex-only query, select an institution manually. Then choose the remaining options and press “Fetch works and build CSV.” Retrieval, deduplication and classification happen automatically.
 7. **Download your data**: After the fetch completes, you’ll see charts, a data preview, and buttons for Excel/CSV downloads.
    - Without a SerpApi key, Google Scholar lookups rely on `scholarly` plus free proxies; this can be slower or less reliable than SerpApi.
 
@@ -118,6 +118,8 @@ label = "Another University Repository"
 base_url = "https://repository.example.edu/server/api"
 configuration = "default"
 enabled = true
+openalex_institution_id = "https://openalex.org/I123456789"
+ror_id = "https://ror.org/012345678"
 entity_types = ["Article", "Book", "Artistic"]
 
 # Optional: restrict searches to a DSpace community or collection UUID.
@@ -131,10 +133,14 @@ Configuration fields:
 - `base_url` is the DSpace REST root and normally ends in `/server/api`. The app adds `/discover/search/objects` automatically.
 - `configuration` names the DSpace Discovery configuration, usually `default`.
 - `enabled` controls whether the source appears in the application without deleting its configuration.
-- `entity_types` lists the DSpace entity categories to query. Values must match those used by that repository. The defaults are `Article`, `Book`, and `Artistic`.
+- `openalex_institution_id` is the repository owner's OpenAlex institution URL. It is the preferred identifier for automatic OpenAlex queries made alongside this DSpace source.
+- `ror_id` is the corresponding ROR URL. It documents the portable institutional identity and is used as the OpenAlex query identifier when no OpenAlex ID is configured.
+- `entity_types` defines the DSpace API categories available through the publication-type multiselect. Values must match those used by that repository. The defaults are `Article`, `Book`, and `Artistic`.
 - `scope` is optional and restricts searches to a community or collection UUID.
 
-When multiple sources are selected, the app queries them independently in one automated run, normalizes their metadata, and deduplicates matching publications before enrichment and SDG classification.
+When OpenAlex and one or more linked DSpace sources are selected, the app queries all distinct configured institutions in OpenAlex. This avoids silently combining a repository with an unrelated manually selected institution. When multiple sources are selected, the app queries them independently in one automated run, normalizes their metadata, and deduplicates matching publications before enrichment and SDG classification.
+
+The user-facing publication types are normalized rather than copied literally from the DSpace API. In particular, selecting **Monographs / books**, **Book chapters**, or both queries the DSpace `Book` entity category once. Records are then classified as `book` or `book-chapter` from their `dc.type` value. Selecting both does not duplicate the API request or the resulting records.
 
 For an untracked local source, put the same `[[dspace_sources]]` structure in `.streamlit/secrets.toml`. A local entry with the same `id` replaces the tracked entry; a new `id` adds another source. Restart Streamlit after changing source configuration if the running app does not rerun automatically.
 

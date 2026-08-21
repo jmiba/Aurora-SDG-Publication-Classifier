@@ -7,4 +7,6 @@ label = "SWPS SHARE"
 base_url = "https://share.swps.edu.pl/server/api"
 configuration = "default"
 enabled = true
+openalex_institution_id = "https://openalex.org/I36685595"
+ror_id = "https://ror.org/0407f1r36"
 entity_types = ["Article", "Book", "Artistic"]

@@ -12,6 +12,59 @@ from openalex_sdg import FetchStats
 
 
 class AppStateTests(unittest.TestCase):
+    def test_selecting_linked_dspace_source_uses_configured_institution(self) -> None:
+        app = AppTest.from_file("app.py").run(timeout=30)
+        app.multiselect[0].set_value(["openalex", "dspace:swps-share"])
+        app.run(timeout=30)
+
+        self.assertEqual(list(app.exception), [])
+        self.assertTrue(
+            any(
+                "https://openalex.org/I36685595" in caption.value
+                and "https://ror.org/0407f1r36" in caption.value
+                for caption in app.caption
+            )
+        )
+        self.assertFalse(
+            any("Search by institution" in widget.label for widget in app.text_input)
+        )
+        self.assertIn("Artistic works", app.multiselect[1].options)
+
+    def test_publication_type_selector_is_multichoice_and_expands_dspace_books(self) -> None:
+        source = app_module.DSpaceSource(
+            id="example",
+            label="Example",
+            base_url="https://repo.example/server/api",
+            entity_types=("Book", "Artistic"),
+        )
+        with patch.object(
+            app_module.st,
+            "multiselect",
+            return_value=["book", "book-chapter"],
+        ) as multiselect:
+            selected = app_module.render_publication_type_selector(False, [source])
+
+        self.assertEqual(selected, ["book", "book-chapter"])
+        options = multiselect.call_args.kwargs["options"]
+        self.assertEqual(options, ["book", "book-chapter", "artistic-work"])
+        self.assertEqual(multiselect.call_args.kwargs["default"], options)
+
+    def test_configured_dspace_identifiers_drive_openalex_selection(self) -> None:
+        source = app_module.DSpaceSource(
+            id="example",
+            label="Example",
+            base_url="https://repo.example/server/api",
+            openalex_institution_id="https://openalex.org/I123",
+            ror_id="https://ror.org/012345678",
+        )
+        with patch.object(app_module.st, "checkbox", return_value=False):
+            institution_ids, include_lineage = (
+                app_module.render_configured_institution_selector([source])
+            )
+
+        self.assertEqual(institution_ids, ["https://openalex.org/I123"])
+        self.assertFalse(include_lineage)
+
     def test_institution_network_renders_nodes_above_edges_with_black_labels(self) -> None:
         rows = [
             {
