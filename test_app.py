@@ -37,6 +37,65 @@ def make_selection(**overrides):
 
 
 class AppStateTests(unittest.TestCase):
+    def test_network_edges_are_clipped_by_sphere_radius(self) -> None:
+        clipped_start, clipped_end = app_module._edge_endpoints_outside_spheres(
+            (0.0, 0.0, 0.0),
+            (1.0, 0.0, 0.0),
+            start_radius=0.105,
+            end_radius=0.03,
+        )
+
+        self.assertAlmostEqual(clipped_start[0], 0.105)
+        self.assertAlmostEqual(clipped_end[0], 0.97)
+        self.assertEqual(clipped_start[1:], (0.0, 0.0))
+        self.assertEqual(clipped_end[1:], (0.0, 0.0))
+
+        short_start, short_end = app_module._edge_endpoints_outside_spheres(
+            (0.0, 0.0, 0.0),
+            (0.1, 0.0, 0.0),
+            start_radius=0.105,
+            end_radius=0.105,
+        )
+        self.assertLess(short_start[0], short_end[0])
+
+    def test_sphere_mesh_has_expected_vertices_faces_and_metadata(self) -> None:
+        geometry = app_module._build_sphere_mesh(
+            {"Example University": (0.0, 0.0, 0.0)},
+            {"Example University": 0.1},
+            {"Example University": 3},
+            latitude_steps=2,
+            longitude_steps=4,
+        )
+
+        self.assertEqual(len(geometry.x), 12)
+        self.assertEqual(len(geometry.i), 16)
+        self.assertAlmostEqual(max(geometry.x), 0.1)
+        self.assertEqual(set(geometry.intensity), {3.0})
+        self.assertEqual(
+            set(geometry.hover_text),
+            {"Example University (3 co-affiliations)"},
+        )
+
+    def test_default_sphere_mesh_uses_smooth_tessellation(self) -> None:
+        geometry = app_module._build_sphere_mesh(
+            {"Example University": (0.0, 0.0, 0.0)},
+            {"Example University": 0.1},
+            {"Example University": 3},
+        )
+
+        expected_vertices = (
+            app_module.SPHERE_LATITUDE_STEPS + 1
+        ) * app_module.SPHERE_LONGITUDE_STEPS
+        expected_faces = (
+            app_module.SPHERE_LATITUDE_STEPS
+            * app_module.SPHERE_LONGITUDE_STEPS
+            * 2
+        )
+        self.assertEqual(len(geometry.x), expected_vertices)
+        self.assertEqual(len(geometry.i), expected_faces)
+        self.assertGreaterEqual(app_module.SPHERE_LATITUDE_STEPS, 16)
+        self.assertGreaterEqual(app_module.SPHERE_LONGITUDE_STEPS, 32)
+
     def test_model_selector_uses_selected_index_when_descriptions_collide(self) -> None:
         models = [("first", "Same description"), ("second", "Same description")]
         with (
@@ -306,7 +365,7 @@ class AppStateTests(unittest.TestCase):
 
         self.assertIn("optional scholarly free-proxy fallback", warning.call_args.args[0])
 
-    def test_institution_network_renders_nodes_above_edges_with_black_labels(self) -> None:
+    def test_institution_network_renders_zoom_consistent_spheres(self) -> None:
         rows = [
             {
                 "publication_date": "2024-05-01",
@@ -326,22 +385,29 @@ class AppStateTests(unittest.TestCase):
             )
 
         figure = plotly_chart.call_args.args[0]
-        node_trace = figure.data[-1]
-        self.assertEqual(node_trace.mode, "markers+text")
-        self.assertEqual(node_trace.marker.opacity, 1.0)
-        self.assertEqual(node_trace.marker.line.color, "#ffffff")
-        self.assertEqual(node_trace.textfont.color, "#000000")
-        self.assertTrue(all(trace.mode == "lines" for trace in figure.data[:-1]))
+        edge_traces = figure.data[:-2]
+        sphere_trace = figure.data[-2]
+        label_trace = figure.data[-1]
+        self.assertEqual(sphere_trace.type, "mesh3d")
+        self.assertEqual(sphere_trace.opacity, 1.0)
+        self.assertFalse(sphere_trace.flatshading)
+        self.assertEqual(label_trace.mode, "text")
+        self.assertEqual(label_trace.textfont.color, "#000000")
+        self.assertTrue(all(trace.mode == "lines" for trace in edge_traces))
+        single_edge = figure.data[0]
+        self.assertEqual(single_edge.line.width, 4.0)
+        self.assertEqual(single_edge.line.color, "rgba(140,140,140,0.82)")
+        self.assertEqual(single_edge.hoverlabel.bgcolor, "#f2f2f2")
         self.assertTrue(
             all(
-                trace.line.color.startswith("rgba(130,130,130,")
-                for trace in figure.data[:-1]
+                trace.line.color.startswith("rgba(140,140,140,")
+                for trace in edge_traces
             )
         )
         self.assertTrue(
             all(
                 trace.hoverlabel.font.color == "#000000"
-                for trace in figure.data[:-1]
+                for trace in edge_traces
             )
         )
 

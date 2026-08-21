@@ -62,6 +62,8 @@ PREVIEW_COLUMNS = [
     "institutions",
 ]
 PREVIEW_PAGE_SIZE = 25
+SPHERE_LATITUDE_STEPS = 16
+SPHERE_LONGITUDE_STEPS = 32
 CSV_FIELDNAMES = [
     "publication_key",
     "source",
@@ -466,6 +468,95 @@ def render_oa_ring_chart(rows: List[Dict[str, Any]]) -> None:
     )
     st.altair_chart(chart, width="stretch")
 
+@dataclass
+class _SphereMeshGeometry:
+    """Vertex and triangle arrays for all institution spheres in one Plotly mesh."""
+
+    x: List[float]
+    y: List[float]
+    z: List[float]
+    i: List[int]
+    j: List[int]
+    k: List[int]
+    intensity: List[float]
+    hover_text: List[str]
+
+
+def _edge_endpoints_outside_spheres(
+    start: Tuple[float, float, float],
+    end: Tuple[float, float, float],
+    start_radius: float,
+    end_radius: float,
+) -> Tuple[Tuple[float, float, float], Tuple[float, float, float]]:
+    """Clip a 3D edge so it meets the surfaces of its spherical nodes."""
+    delta_x = end[0] - start[0]
+    delta_y = end[1] - start[1]
+    delta_z = end[2] - start[2]
+    distance = math.sqrt(delta_x**2 + delta_y**2 + delta_z**2)
+    if distance <= 0:
+        return start, end
+
+    direction = (delta_x / distance, delta_y / distance, delta_z / distance)
+    maximum_offset = distance * 0.35
+    start_offset = min(maximum_offset, max(0.0, start_radius))
+    end_offset = min(maximum_offset, max(0.0, end_radius))
+    clipped_start = (
+        start[0] + direction[0] * start_offset,
+        start[1] + direction[1] * start_offset,
+        start[2] + direction[2] * start_offset,
+    )
+    clipped_end = (
+        end[0] - direction[0] * end_offset,
+        end[1] - direction[1] * end_offset,
+        end[2] - direction[2] * end_offset,
+    )
+    return clipped_start, clipped_end
+
+
+def _build_sphere_mesh(
+    node_positions: Mapping[str, Tuple[float, float, float]],
+    node_radii: Mapping[str, float],
+    node_degrees: Mapping[str, int],
+    *,
+    latitude_steps: int = SPHERE_LATITUDE_STEPS,
+    longitude_steps: int = SPHERE_LONGITUDE_STEPS,
+) -> _SphereMeshGeometry:
+    """Build a compact multi-sphere triangle mesh with per-node hover metadata."""
+    geometry = _SphereMeshGeometry([], [], [], [], [], [], [], [])
+    for node in sorted(node_positions):
+        center_x, center_y, center_z = node_positions[node]
+        radius = node_radii[node]
+        degree_value = node_degrees.get(node, 1)
+        hover_text = f"{node} ({degree_value} co-affiliations)"
+        vertex_offset = len(geometry.x)
+
+        for latitude_index in range(latitude_steps + 1):
+            latitude = -math.pi / 2 + math.pi * latitude_index / latitude_steps
+            ring_radius = radius * math.cos(latitude)
+            ring_z = center_z + radius * math.sin(latitude)
+            for longitude_index in range(longitude_steps):
+                longitude = 2 * math.pi * longitude_index / longitude_steps
+                geometry.x.append(center_x + ring_radius * math.cos(longitude))
+                geometry.y.append(center_y + ring_radius * math.sin(longitude))
+                geometry.z.append(ring_z)
+                geometry.intensity.append(float(degree_value))
+                geometry.hover_text.append(hover_text)
+
+        for latitude_index in range(latitude_steps):
+            lower_ring = vertex_offset + latitude_index * longitude_steps
+            upper_ring = lower_ring + longitude_steps
+            for longitude_index in range(longitude_steps):
+                next_longitude = (longitude_index + 1) % longitude_steps
+                lower = lower_ring + longitude_index
+                lower_next = lower_ring + next_longitude
+                upper = upper_ring + longitude_index
+                upper_next = upper_ring + next_longitude
+                geometry.i.extend([lower, lower_next])
+                geometry.j.extend([upper, upper])
+                geometry.k.extend([lower_next, upper_next])
+    return geometry
+
+
 def render_institution_network(
     rows: List[Dict[str, Any]],
     start_date: str,
@@ -641,74 +732,109 @@ def render_institution_network(
         for node, coords in pos.items()
     }
 
+    max_deg = max(degree.get(node, 1) for node in top_nodes)
+    desired_node_radii = {
+        node: 0.03 + (degree.get(node, 1) / max_deg) * 0.075
+        for node in top_nodes
+    }
+    minimum_neighbor_distances = {node: math.inf for node in top_nodes}
+    for a, b in filtered_edges:
+        a_position = node_positions[a]
+        b_position = node_positions[b]
+        distance = math.sqrt(
+            sum(
+                (b_position[index] - a_position[index]) ** 2
+                for index in range(3)
+            )
+        )
+        minimum_neighbor_distances[a] = min(minimum_neighbor_distances[a], distance)
+        minimum_neighbor_distances[b] = min(minimum_neighbor_distances[b], distance)
+    node_radii = {
+        node: min(desired_node_radii[node], minimum_neighbor_distances[node] * 0.3)
+        for node in top_nodes
+    }
+
     edge_traces = []
     for (a, b), w in filtered_edges.items():
-        x0, y0, z0 = node_positions[a]
-        x1, y1, z1 = node_positions[b]
-        width = max(1.0, min(10.0, w * 2.0))
-        alpha = min(0.85, 0.4 + 0.15 * (w - 1))
+        edge_start, edge_end = _edge_endpoints_outside_spheres(
+            node_positions[a],
+            node_positions[b],
+            node_radii[a],
+            node_radii[b],
+        )
+        x0, y0, z0 = edge_start
+        x1, y1, z1 = edge_end
+        # Keep a single co-authorship prominent, then scale repeated links
+        # logarithmically so high-weight edges do not dominate the network.
+        weight_scale = math.log2(max(1, w))
+        width = min(10.0, 4.0 + 2.0 * weight_scale)
+        alpha = min(0.96, 0.82 + 0.05 * weight_scale)
         mid_x = (x0 + x1) / 2
         mid_y = (y0 + y1) / 2
         mid_z = (z0 + z1) / 2
-        edge_color = f"rgba(130,130,130,{alpha})"
+        edge_color = f"rgba(140,140,140,{alpha})"
         edge_traces.append(
             go.Scatter3d(
-                x=[x0, x1, mid_x, None],
-                y=[y0, y1, mid_y, None],
-                z=[z0, z1, mid_z, None],
+                x=[x0, mid_x, x1, None],
+                y=[y0, mid_y, y1, None],
+                z=[z0, mid_z, z1, None],
                 mode="lines",
                 line=dict(color=edge_color, width=width),
                 hoverinfo="text",
-                text=["", "", f"Co-authored works: {w}", ""],
-                hoverlabel=dict(bgcolor=edge_color, font=dict(color="#000000")),
+                text=["", f"Co-authored works: {w}", "", ""],
+                hoverlabel=dict(bgcolor="#f2f2f2", font=dict(color="#000000")),
             )
         )
 
-    node_x = []
-    node_y = []
-    node_z = []
-    node_sizes = []
-    node_text = []
-    max_deg = max(degree.get(n, 1) for n in top_nodes)
-    for node in top_nodes:
-        x, y, z = node_positions[node]
-        node_x.append(x)
-        node_y.append(y)
-        node_z.append(z)
-        deg = degree.get(node, 1)
-        node_sizes.append(10 + (deg / max_deg) * 25)
-        base_label = node
-        node_text.append(f"{base_label} ({deg} co-affiliations)")
-
-    node_trace = go.Scatter3d(
-        x=node_x,
-        y=node_y,
-        z=node_z,
-        mode="markers+text",
-        marker=dict(
-            size=node_sizes,
-            color=node_sizes,
-            colorscale=[[0, "#b4a4e8"], [1, "#4d1fe3"]],  # light violet to dark
-            showscale=True,
-            colorbar=dict(title="Degree"),
-            opacity=1.0,
-            line=dict(color="#ffffff", width=2),
+    sphere_geometry = _build_sphere_mesh(node_positions, node_radii, degree)
+    sphere_trace = go.Mesh3d(
+        x=sphere_geometry.x,
+        y=sphere_geometry.y,
+        z=sphere_geometry.z,
+        i=sphere_geometry.i,
+        j=sphere_geometry.j,
+        k=sphere_geometry.k,
+        intensity=sphere_geometry.intensity,
+        intensitymode="vertex",
+        colorscale=[[0, "#b4a4e8"], [1, "#4d1fe3"]],
+        cmin=0,
+        cmax=max_deg,
+        showscale=True,
+        colorbar=dict(title="Degree"),
+        opacity=1.0,
+        flatshading=False,
+        lighting=dict(
+            ambient=0.55,
+            diffuse=0.9,
+            specular=0.35,
+            roughness=0.55,
+            fresnel=0.15,
         ),
-        text=[txt.split(" (")[0] for txt in node_text],
+        lightposition=dict(x=100, y=200, z=300),
+        hovertext=sphere_geometry.hover_text,
+        hoverinfo="text",
+        name="Institutions",
+    )
+    label_nodes = sorted(top_nodes)
+    label_trace = go.Scatter3d(
+        x=[node_positions[node][0] for node in label_nodes],
+        y=[node_positions[node][1] for node in label_nodes],
+        z=[node_positions[node][2] + node_radii[node] for node in label_nodes],
+        mode="text",
+        text=label_nodes,
         textposition="top center",
         textfont=dict(size=14, color="#000000"),
-        hovertext=node_text,
-        hoverinfo="text",
+        hoverinfo="skip",
+        name="Institution labels",
     )
-    # Keep the opaque node layer last so it renders in front of the edge layer.
-    fig = go.Figure(data=[*edge_traces, node_trace])
+    fig = go.Figure(data=[*edge_traces, sphere_trace, label_trace])
     fig.update_layout(
         showlegend=False,
         margin=dict(l=0, r=0, t=0, b=0),
         scene=dict(xaxis=dict(visible=False), yaxis=dict(visible=False), zaxis=dict(visible=False)),
     )
     fig.update_layout(height=650)
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 def render_author_oa_chart(
     rows: List[Dict[str, Any]], start_date: str, end_date: str, max_authors: int = 20
