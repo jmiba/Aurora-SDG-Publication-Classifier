@@ -7,7 +7,7 @@ This Streamlit app explores publications from OpenAlex and any number of configu
 - **Select one or more sources**: Query OpenAlex, configured DSpace repositories, or both in one automated run.
 - **Search OpenAlex institutions**: When OpenAlex is selected, search its institution registry or paste a ROR/OpenAlex institution URL.
 - **Use generic DSpace sources**: Configure public DSpace REST APIs through repeatable `[[dspace_sources]]` entries. SWPS SHARE is the initial registry entry, not a special code path.
-- **Set filters**: Choose publication types, SDG classifier models, time windows, and optional record limits.
+- **Set filters**: Choose publication types, SDG classifier models, time windows, and optional record limits. Limited multi-source results are selected newest-first after deduplication rather than by source order.
 - **Deduplicate automatically**: Exact normalized DOI matches, or exact normalized title/year/first-author matches, are merged before enrichment and classification.
 - **Fetch SDG predictions**: Canonical publications and classifications are cached locally in `cache.sqlite3` to avoid redundant Aurora calls.
 - **Enrich abstracts**: If all selected source records lack an abstract, the app can fall back to Semantic Scholar and Google Scholar.
@@ -62,11 +62,11 @@ flowchart TB
 
 ## How it works in the background
 
-1. **Source fetch**: OpenAlex uses the selected institution, lineage, date and publication type. Each selected DSpace API is queried independently with its configured Discovery profile, scope and entity types. DSpace pages use metadata-only search results; media endpoints are never followed.
+1. **Source fetch**: OpenAlex uses the selected institution, lineage, date and publication type. Each selected DSpace API is queried independently with its configured Discovery profile, scope and entity types. When a record limit is set, each DSpace entity category contributes candidates before the global newest-first limit is applied. DSpace pages use metadata-only search results; media endpoints are never followed.
 2. **Normalization and deduplication**: Source-qualified record IDs remain preserved while exact DOI or exact title/year/first-author matches become one canonical publication. Fuzzy similarity is not used for automatic merging.
-3. **Caching**: `source_records` preserves raw source responses, `canonical_works` stores merged publications, and `sdg_results_v2` stores classifications with the hash of the classified text. The legacy `works` and `sdg_results` tables remain intact and are copied additively on first use.
+3. **Caching**: `source_records` preserves raw source responses, `canonical_works` stores merged publications, and `sdg_results_v2` stores classifications with the hash of the classified text. Cache updates preserve accumulated provenance and richer abstracts when a later query uses fewer sources. The legacy `works` and `sdg_results` tables remain intact and are copied additively on first use.
 4. **SDG classification**: Depending on the model, the selected abstract or title is sent to Aurora once per canonical publication. An unchanged text hash reuses the previous result.
-5. **Abstract enrichment**: If the selected source records provide no abstract, cached text is reused before external fallbacks:
+5. **Abstract enrichment**: DSpace abstracts are read from both `dc.abstract*` and standard `dc.description.abstract*` metadata. The richer of current source text and cached text is reused before external fallbacks:
     - **Semantic Scholar**: Called via its official API using the paper's DOI. Requires an optional API key.
     - **Google Scholar**: Uses [SerpApi](https://serpapi.com/) when a key is provided; otherwise falls back to `scholarly` with free proxies (less reliable).
 6. **Exports**: CSV and XLSX include canonical IDs, source-qualified record IDs, source URLs, source counts and provenance alongside the existing publication and SDG fields.

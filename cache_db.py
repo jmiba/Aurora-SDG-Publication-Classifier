@@ -333,8 +333,46 @@ def get_cached_work(publication_key: str) -> Optional[Dict[str, Any]]:
     return get_cached_publication(publication_key)
 
 
-def upsert_publication(row: Mapping[str, Any]) -> None:
-    """Create or update a canonical publication."""
+def _split_semicolon(value: Any) -> list[str]:
+    return [part.strip() for part in str(value or "").split(";") if part.strip()]
+
+
+def _merge_semicolon(left: Any, right: Any) -> str:
+    return "; ".join(dict.fromkeys([*_split_semicolon(left), *_split_semicolon(right)]))
+
+
+def _json_list(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if not value:
+        return []
+    try:
+        decoded = json.loads(str(value))
+    except (json.JSONDecodeError, TypeError):
+        return []
+    return decoded if isinstance(decoded, list) else []
+
+
+def _merge_json_records(left: Any, right: Any, key_fields: tuple[str, ...]) -> str:
+    merged: list[Any] = []
+    positions: Dict[str, int] = {}
+    for entry in [*_json_list(left), *_json_list(right)]:
+        if not isinstance(entry, Mapping):
+            continue
+        key = next((str(entry.get(field) or "").strip() for field in key_fields if entry.get(field)), "")
+        if key and key in positions:
+            merged[positions[key]] = dict(entry)
+        else:
+            if key:
+                positions[key] = len(merged)
+            merged.append(dict(entry))
+    return json.dumps(merged, ensure_ascii=False)
+
+
+def _canonical_payload(
+    row: Mapping[str, Any], existing: Optional[Mapping[str, Any]] = None
+) -> Dict[str, Any]:
+    """Build a canonical row without discarding richer data from earlier runs."""
     publication_key = str(row.get("publication_key") or "").strip()
     if not publication_key:
         raise ValueError("publication_key is required")
@@ -365,30 +403,109 @@ def upsert_publication(row: Mapping[str, Any]) -> None:
         "source_provenance_json": row.get("source_provenance_json"),
         "updated_at": _now(),
     }
+    if not existing:
+        return payload
+
+    existing_oa, existing_status = reconcile_oa_pair(
+        existing.get("is_oa"), existing.get("oa_status")
+    )
+    if True in (existing_oa, is_oa):
+        payload["is_oa"] = 1
+        open_statuses = [
+            status
+            for status in (existing_status, oa_status)
+            if status not in {"closed", "unknown"}
+        ]
+        payload["oa_status"] = next(
+            (status for status in open_statuses if status != "open"),
+            open_statuses[0] if open_statuses else "open",
+        )
+    elif False in (existing_oa, is_oa):
+        payload["is_oa"] = 0
+        payload["oa_status"] = "closed"
+    else:
+        payload["is_oa"] = None
+        payload["oa_status"] = "unknown"
+
+    for field in (
+        "record_url",
+        "openalex_id",
+        "publication_date",
+        "doi",
+        "type",
+        "language",
+    ):
+        if not payload.get(field):
+            payload[field] = existing.get(field)
+    for field in ("title", "abstract", "authors"):
+        if len(str(existing.get(field) or "")) > len(str(payload.get(field) or "")):
+            payload[field] = existing.get(field)
+    for field in (
+        "source",
+        "source_record_id",
+        "source_record_keys",
+        "record_urls",
+        "institutions",
+        "institution_ids",
+        "institution_countries",
+        "institution_names_raw",
+    ):
+        payload[field] = _merge_semicolon(existing.get(field), payload.get(field))
+    payload["institution_affiliations_json"] = _merge_json_records(
+        existing.get("institution_affiliations_json"),
+        payload.get("institution_affiliations_json"),
+        ("id", "name"),
+    )
+    payload["source_provenance_json"] = _merge_json_records(
+        existing.get("source_provenance_json"),
+        payload.get("source_provenance_json"),
+        ("source_record_key",),
+    )
+    payload["source_count"] = max(
+        int(existing.get("source_count") or 0), int(payload.get("source_count") or 0), 1
+    )
+    return payload
+
+
+def _execute_upsert_publication(
+    conn: sqlite3.Connection, payload: Mapping[str, Any]
+) -> None:
     columns = ", ".join(payload)
     placeholders = ", ".join(f":{column}" for column in payload)
     update_clause = ", ".join(
         f"{column}=excluded.{column}" for column in payload if column != "publication_key"
     )
+    conn.execute(
+        f"""
+        INSERT INTO canonical_works ({columns}) VALUES ({placeholders})
+        ON CONFLICT(publication_key) DO UPDATE SET {update_clause}
+        """,
+        payload,
+    )
+
+
+def upsert_publication(row: Mapping[str, Any]) -> None:
+    """Create or enrich a canonical publication without reducing cached metadata."""
     with _LOCK:
         conn = _get_conn()
-        conn.execute(
-            f"""
-            INSERT INTO canonical_works ({columns}) VALUES ({placeholders})
-            ON CONFLICT(publication_key) DO UPDATE SET {update_clause}
-            """,
-            payload,
-        )
-        conn.commit()
+        with conn:
+            publication_key = str(row.get("publication_key") or "").strip()
+            existing_row = conn.execute(
+                "SELECT * FROM canonical_works WHERE publication_key = ?", (publication_key,)
+            ).fetchone()
+            payload = _canonical_payload(row, dict(existing_row) if existing_row else None)
+            _execute_upsert_publication(conn, payload)
 
 
-def upsert_source_record(publication_key: str, source_record: Mapping[str, Any]) -> None:
+def _source_record_payload(
+    publication_key: str, source_record: Mapping[str, Any]
+) -> Optional[Dict[str, Any]]:
     source_record_key = str(source_record.get("source_record_key") or "").strip()
     source_record_id = str(source_record.get("source_record_id") or "").strip()
     if not source_record_key or not source_record_id:
-        return
+        return None
     raw_record = source_record.get("raw_record") or source_record.get("_raw_record")
-    payload = {
+    return {
         "source_record_key": source_record_key,
         "publication_key": publication_key,
         "source": source_record.get("source") or "unknown",
@@ -398,34 +515,96 @@ def upsert_source_record(publication_key: str, source_record: Mapping[str, Any])
         "raw_json": json.dumps(raw_record, ensure_ascii=False) if raw_record else None,
         "fetched_at": _now(),
     }
+
+
+def _execute_upsert_source_record(
+    conn: sqlite3.Connection, payload: Mapping[str, Any]
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO source_records (
+            source_record_key, publication_key, source, source_label,
+            source_record_id, record_url, raw_json, fetched_at
+        ) VALUES (
+            :source_record_key, :publication_key, :source, :source_label,
+            :source_record_id, :record_url, :raw_json, :fetched_at
+        )
+        ON CONFLICT(source_record_key) DO UPDATE SET
+            publication_key=excluded.publication_key,
+            source=excluded.source,
+            source_label=excluded.source_label,
+            source_record_id=excluded.source_record_id,
+            record_url=excluded.record_url,
+            raw_json=excluded.raw_json,
+            fetched_at=excluded.fetched_at
+        """,
+        payload,
+    )
+
+
+def _sync_canonical_provenance(conn: sqlite3.Connection, publication_key: str) -> None:
+    """Make the canonical source summary match all persisted source records."""
+    rows = conn.execute(
+        """
+        SELECT source_record_key, source, source_label, source_record_id, record_url
+        FROM source_records
+        WHERE publication_key = ?
+        ORDER BY source_record_key
+        """,
+        (publication_key,),
+    ).fetchall()
+    if not rows:
+        return
+    provenance = [dict(record) for record in rows]
+    sources = list(dict.fromkeys(record["source"] for record in provenance if record["source"]))
+    source_ids = list(
+        dict.fromkeys(record["source_record_id"] for record in provenance if record["source_record_id"])
+    )
+    source_keys = [record["source_record_key"] for record in provenance]
+    record_urls = list(
+        dict.fromkeys(record["record_url"] for record in provenance if record["record_url"])
+    )
+    conn.execute(
+        """
+        UPDATE canonical_works
+        SET source = ?, source_record_id = ?, source_record_keys = ?,
+            record_url = ?, record_urls = ?, source_count = ?,
+            source_provenance_json = ?, updated_at = ?
+        WHERE publication_key = ?
+        """,
+        (
+            "; ".join(sources),
+            "; ".join(source_ids),
+            "; ".join(source_keys),
+            record_urls[0] if record_urls else None,
+            "; ".join(record_urls),
+            len(sources),
+            json.dumps(provenance, ensure_ascii=False),
+            _now(),
+            publication_key,
+        )
+    )
+
+
+def upsert_source_record(publication_key: str, source_record: Mapping[str, Any]) -> None:
+    payload = _source_record_payload(publication_key, source_record)
+    if not payload:
+        return
     with _LOCK:
         conn = _get_conn()
-        conn.execute(
-            """
-            INSERT INTO source_records (
-                source_record_key, publication_key, source, source_label,
-                source_record_id, record_url, raw_json, fetched_at
-            ) VALUES (
-                :source_record_key, :publication_key, :source, :source_label,
-                :source_record_id, :record_url, :raw_json, :fetched_at
-            )
-            ON CONFLICT(source_record_key) DO UPDATE SET
-                publication_key=excluded.publication_key,
-                source=excluded.source,
-                source_label=excluded.source_label,
-                source_record_id=excluded.source_record_id,
-                record_url=excluded.record_url,
-                raw_json=excluded.raw_json,
-                fetched_at=excluded.fetched_at
-            """,
-            payload,
-        )
-        conn.commit()
+        with conn:
+            previous = conn.execute(
+                "SELECT publication_key FROM source_records WHERE source_record_key = ?",
+                (payload["source_record_key"],),
+            ).fetchone()
+            _execute_upsert_source_record(conn, payload)
+            _sync_canonical_provenance(conn, publication_key)
+            if previous and previous["publication_key"] != publication_key:
+                _sync_canonical_provenance(conn, previous["publication_key"])
 
 
 def upsert_work(row: Mapping[str, Any], raw_record: Optional[Mapping[str, Any]] = None) -> None:
-    """Backward-compatible wrapper around canonical/source record persistence."""
-    upsert_publication(row)
+    """Persist one canonical work and its source records in a single transaction."""
     publication_key = str(row.get("publication_key") or "")
     source_records = row.get("_source_records") or []
     if not source_records and row.get("source_record_key"):
@@ -439,8 +618,28 @@ def upsert_work(row: Mapping[str, Any], raw_record: Optional[Mapping[str, Any]] 
                 "raw_record": raw_record,
             }
         ]
-    for source_record in source_records:
-        upsert_source_record(publication_key, source_record)
+    with _LOCK:
+        conn = _get_conn()
+        with conn:
+            existing_row = conn.execute(
+                "SELECT * FROM canonical_works WHERE publication_key = ?", (publication_key,)
+            ).fetchone()
+            payload = _canonical_payload(row, dict(existing_row) if existing_row else None)
+            _execute_upsert_publication(conn, payload)
+            previous_publication_keys = set()
+            for source_record in source_records:
+                source_payload = _source_record_payload(publication_key, source_record)
+                if source_payload:
+                    previous = conn.execute(
+                        "SELECT publication_key FROM source_records WHERE source_record_key = ?",
+                        (source_payload["source_record_key"],),
+                    ).fetchone()
+                    if previous and previous["publication_key"] != publication_key:
+                        previous_publication_keys.add(previous["publication_key"])
+                    _execute_upsert_source_record(conn, source_payload)
+            _sync_canonical_provenance(conn, publication_key)
+            for previous_key in previous_publication_keys:
+                _sync_canonical_provenance(conn, previous_key)
 
 
 def get_cached_sdg_result(publication_key: str, model: str) -> Optional[Dict[str, Any]]:
@@ -459,7 +658,7 @@ def get_cached_sdg_result(publication_key: str, model: str) -> Optional[Dict[str
 def upsert_sdg_result(
     publication_key: Optional[str] = None,
     model: str = "",
-    sdg_response: Optional[Dict[str, Any]] = None,
+    sdg_response: Optional[Any] = None,
     sdg_formatted: str = "",
     sdg_note: str = "",
     text_hash: str = "",

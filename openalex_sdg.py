@@ -10,7 +10,7 @@ import time
 import unicodedata
 from dataclasses import dataclass, field
 from html import unescape
-from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 import requests
 
@@ -396,7 +396,7 @@ def classify_text_aurora(
     user_agent: str = DEFAULT_USER_AGENT,
     retries: int = 3,
     pause: float = 0.4,
-) -> Tuple[Optional[dict], str]:
+) -> Tuple[Optional[Any], str]:
     """
     Calls Aurora SDG classifier via POST, returns (json or None, note string).
     note is "" on success, or an explanation like "http_error:429" / "empty json".
@@ -463,7 +463,7 @@ def get_abstract_from_semantic_scholar(
             time.sleep(pause * attempt)
     return None
 
-def format_sdg_predictions(sdg_json: Optional[dict]) -> str:
+def format_sdg_predictions(sdg_json: Optional[Any]) -> str:
     """
     Returns '\n'-joined strings like "84% SDG 10 (Reduced inequalities)".
     Handles multiple API variants.
@@ -483,10 +483,14 @@ def format_sdg_predictions(sdg_json: Optional[dict]) -> str:
 
     items: List[Tuple[float, str, str]] = []
 
-    preds = sdg_json.get("predictions")
+    preds = sdg_json.get("predictions") if isinstance(sdg_json, Mapping) else None
     if isinstance(preds, list) and preds:
         for entry in preds:
+            if not isinstance(entry, Mapping):
+                continue
             sdg = entry.get("sdg") or {}
+            if not isinstance(sdg, Mapping):
+                continue
             code = sdg.get("code")
             name = sdg.get("name")
             score = entry.get("prediction")
@@ -499,17 +503,22 @@ def format_sdg_predictions(sdg_json: Optional[dict]) -> str:
 
     if not items and isinstance(sdg_json, list):
         for entry in sdg_json:
+            if not isinstance(entry, Mapping):
+                continue
             label = entry.get("label")
             score = entry.get("score")
             if label is None or score is None:
                 continue
             match = re.search(r"\bSDG\s*(\d+)", str(label), flags=re.I)
             code = match.group(1) if match else ""
-            items.append((float(score), code, str(label)))
+            try:
+                items.append((float(score), code, str(label)))
+            except (TypeError, ValueError):
+                continue
 
     if (
         not items
-        and isinstance(sdg_json, dict)
+        and isinstance(sdg_json, Mapping)
         and "labels" in sdg_json
         and "scores" in sdg_json
     ):
@@ -518,9 +527,12 @@ def format_sdg_predictions(sdg_json: Optional[dict]) -> str:
         for label, score in zip(labels, scores):
             match = re.search(r"\bSDG\s*(\d+)", str(label), flags=re.I)
             code = match.group(1) if match else ""
-            items.append((float(score), code, str(label)))
+            try:
+                items.append((float(score), code, str(label)))
+            except (TypeError, ValueError):
+                continue
 
-    if not items and isinstance(sdg_json, dict):
+    if not items and isinstance(sdg_json, Mapping):
         numeric_keys = [key for key in sdg_json.keys() if str(key).isdigit()]
         if numeric_keys:
             for key in numeric_keys:
@@ -531,16 +543,21 @@ def format_sdg_predictions(sdg_json: Optional[dict]) -> str:
 
     if (
         not items
-        and isinstance(sdg_json, dict)
+        and isinstance(sdg_json, Mapping)
         and isinstance(sdg_json.get("results"), list)
     ):
         for entry in sdg_json["results"]:
+            if not isinstance(entry, Mapping):
+                continue
             code = entry.get("sdg") or entry.get("code")
             score = entry.get("score") or entry.get("prediction")
             name = entry.get("name") or entry.get("label")
             if code is None or score is None:
                 continue
-            items.append((float(score), code, name))
+            try:
+                items.append((float(score), code, name))
+            except (TypeError, ValueError):
+                continue
 
     if not items:
         return ""
@@ -673,7 +690,7 @@ def _fetch_works_with_sdg_legacy(
                 stats.total_abstracts_available += 1
 
             text_for_sdg = abstract_text if abstract_text else title
-            sdg_json: Optional[dict] = None
+            sdg_json: Optional[Any] = None
             sdg_note = ""
             sdg_formatted = ""
             cached_sdg_entry: Optional[Dict[str, Any]] = None
@@ -783,6 +800,14 @@ def _hash_classification_text(text: str) -> str:
     return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
 
 
+def _publication_recency_key(publication: Mapping[str, Any]) -> Tuple[str, str]:
+    """Return a source-independent key that places newer publications first."""
+    return (
+        str(publication.get("publication_date") or ""),
+        str(publication.get("publication_key") or ""),
+    )
+
+
 def fetch_publications_with_sdg(
     *,
     include_openalex: bool,
@@ -866,6 +891,7 @@ def fetch_publications_with_sdg(
         stats.total_source_records = len(source_records)
         publications = deduplicate_publications(source_records)
         stats.duplicates_removed = len(source_records) - len(publications)
+        publications.sort(key=_publication_recency_key, reverse=True)
         if limit_rows is not None:
             publications = publications[:limit_rows]
         stats.total_expected = len(publications)
@@ -878,16 +904,18 @@ def fetch_publications_with_sdg(
             authors_str = str(publication.get("authors") or "")
             doi = str(publication.get("doi") or "")
             cached_work = get_cached_work(publication_key) if publication_key else None
-            cached_abstract = (cached_work or {}).get("abstract") or ""
+            cached_abstract = clean_html_fragment(
+                str((cached_work or {}).get("abstract") or "")
+            )
             abstract_text = clean_html_fragment(str(publication.get("abstract") or ""))
             source_abstract_missing = not bool(abstract_text)
+            if len(cached_abstract) > len(abstract_text):
+                abstract_text = cached_abstract
             if source_abstract_missing:
                 stats.source_abstract_missing += 1
                 if "openalex" in str(publication.get("source") or "").split("; "):
                     stats.openalex_abstract_missing += 1
-                if cached_abstract:
-                    abstract_text = clean_html_fragment(cached_abstract)
-                elif doi:
+                if not abstract_text and doi:
                     semantic_abstract = get_abstract_from_semantic_scholar(
                         doi,
                         session=session,
@@ -913,11 +941,11 @@ def fetch_publications_with_sdg(
             if abstract_text:
                 stats.total_abstracts_available += 1
             abstract_updated = bool(
-                abstract_text and abstract_text != clean_html_fragment(cached_abstract)
+                abstract_text and abstract_text != cached_abstract
             )
             text_for_sdg = abstract_text or title
             text_hash = _hash_classification_text(text_for_sdg)
-            sdg_json: Optional[dict] = None
+            sdg_json: Optional[Any] = None
             sdg_note = ""
             sdg_formatted = ""
             cached_sdg_entry: Optional[Dict[str, Any]] = None

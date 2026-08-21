@@ -173,6 +173,37 @@ class PublicationSourceTests(unittest.TestCase):
         self.assertEqual(artwork["abstract"], "English description")
         self.assertEqual(artwork["language"], "")
 
+    def test_standard_dspace_description_abstract_is_normalized(self) -> None:
+        record = normalize_dspace_object(
+            dspace_search_object(
+                item_id="standard-abstract",
+                entity_type="Article",
+                title="Standard DSpace metadata",
+                metadata={
+                    "dc.description.abstract": metadata_entry(
+                        "Abstract stored under the standard DSpace key."
+                    ),
+                    "dc.date.issued": metadata_entry("2024"),
+                },
+            ),
+            self.source,
+        )
+
+        self.assertEqual(
+            record["abstract"], "Abstract stored under the standard DSpace key."
+        )
+
+    def test_top_level_aurora_list_response_is_formatted(self) -> None:
+        formatted = openalex_sdg.format_sdg_predictions(
+            [
+                {"label": "SDG 4 (Quality Education)", "score": 0.84},
+                {"label": "malformed", "score": "not-a-number"},
+                None,
+            ]
+        )
+
+        self.assertEqual(formatted, "84% SDG 4 (Quality Education)")
+
     def test_exact_doi_records_are_automatically_merged_with_provenance(self) -> None:
         openalex = normalize_openalex_work(
             {
@@ -292,6 +323,54 @@ class PublicationSourceTests(unittest.TestCase):
             self.assertNotIn("thumbnail", serialized)
             self.assertNotIn("metrics", serialized)
 
+    def test_dspace_limit_collects_candidates_from_each_entity_type(self) -> None:
+        payloads = []
+        for entity_type in ("Article", "Book", "Artistic"):
+            payloads.append(
+                {
+                    "_embedded": {
+                        "searchResult": {
+                            "page": {
+                                "number": 0,
+                                "size": 1,
+                                "totalPages": 1,
+                                "totalElements": 1,
+                            },
+                            "_embedded": {
+                                "objects": [
+                                    dspace_search_object(
+                                        item_id=entity_type.lower(),
+                                        entity_type=entity_type,
+                                        title=entity_type,
+                                        metadata={
+                                            "dc.date.issued": metadata_entry("2024")
+                                        },
+                                    )
+                                ]
+                            },
+                        }
+                    }
+                }
+            )
+        session = FakeSession(payloads)
+
+        records, _ = fetch_dspace_records(
+            session,
+            self.source,
+            from_date="2023-01-01",
+            to_date="2026-08-31",
+            work_type=None,
+            user_agent="test-agent",
+            limit_rows=1,
+            page_size=1,
+        )
+
+        self.assertEqual(len(records), 3)
+        self.assertEqual(
+            [call["params"]["f.entityType"] for call in session.calls],
+            ["Article,equals", "Book,equals", "Artistic,equals"],
+        )
+
     def test_end_of_month_including_leap_year(self) -> None:
         self.assertEqual(end_of_month(date(2024, 2, 1)), date(2024, 2, 29))
         self.assertEqual(end_of_month(date(2025, 2, 1)), date(2025, 2, 28))
@@ -392,6 +471,132 @@ class CacheMigrationTests(unittest.TestCase):
 
         self.assertEqual(repaired["is_oa"], 1)
         self.assertEqual(repaired["oa_status"], "open")
+
+    def test_narrower_run_preserves_provenance_and_richer_abstract(self) -> None:
+        publication = {
+            "publication_key": "doi:10.1234/accumulated",
+            "source": "openalex; example",
+            "source_record_id": "W-ACC; repository-item",
+            "source_record_keys": "openalex:W-ACC; dspace:example:repository-item",
+            "record_url": "https://openalex.org/W-ACC",
+            "record_urls": (
+                "https://openalex.org/W-ACC; "
+                "https://repo.example/handle/repository-item"
+            ),
+            "title": "Accumulated publication",
+            "abstract": "The substantially richer abstract from an earlier combined run.",
+            "source_count": 2,
+            "source_provenance_json": json.dumps(
+                [
+                    {
+                        "source": "openalex",
+                        "source_label": "OpenAlex",
+                        "source_record_id": "W-ACC",
+                        "source_record_key": "openalex:W-ACC",
+                        "record_url": "https://openalex.org/W-ACC",
+                    },
+                    {
+                        "source": "example",
+                        "source_label": "Example Repository",
+                        "source_record_id": "repository-item",
+                        "source_record_key": "dspace:example:repository-item",
+                        "record_url": "https://repo.example/handle/repository-item",
+                    },
+                ]
+            ),
+            "_source_records": [
+                {
+                    "source": "openalex",
+                    "source_label": "OpenAlex",
+                    "source_record_id": "W-ACC",
+                    "source_record_key": "openalex:W-ACC",
+                    "record_url": "https://openalex.org/W-ACC",
+                },
+                {
+                    "source": "example",
+                    "source_label": "Example Repository",
+                    "source_record_id": "repository-item",
+                    "source_record_key": "dspace:example:repository-item",
+                    "record_url": "https://repo.example/handle/repository-item",
+                },
+            ],
+        }
+        cache_db.upsert_work(publication)
+        cache_db.upsert_work(
+            {
+                "publication_key": publication["publication_key"],
+                "source": "openalex",
+                "source_record_id": "W-ACC",
+                "source_record_keys": "openalex:W-ACC",
+                "record_url": "https://openalex.org/W-ACC",
+                "title": "Accumulated publication",
+                "abstract": "Short abstract.",
+                "source_count": 1,
+                "_source_records": [publication["_source_records"][0]],
+            }
+        )
+
+        cached = cache_db.get_cached_publication(publication["publication_key"])
+        provenance = json.loads(cached["source_provenance_json"])
+
+        self.assertEqual(cached["source_count"], 2)
+        self.assertEqual({entry["source"] for entry in provenance}, {"openalex", "example"})
+        self.assertEqual(cached["abstract"], publication["abstract"])
+
+    def test_global_limit_uses_recency_instead_of_source_order(self) -> None:
+        openalex = normalize_openalex_work(
+            {
+                "id": "https://openalex.org/W-OLDER",
+                "title": "Older OpenAlex record",
+                "publication_date": "2023-01-01",
+                "type": "article",
+                "authorships": [],
+            }
+        )
+        dspace = normalize_dspace_object(
+            dspace_search_object(
+                item_id="newer-dspace",
+                entity_type="Article",
+                title="Newer DSpace record",
+                metadata={"dc.date.issued": metadata_entry("2025-01-01")},
+            ),
+            DSpaceSource(
+                id="example",
+                label="Example Repository",
+                base_url="https://repo.example/server/api",
+                entity_types=("Article",),
+            ),
+        )
+        with (
+            patch.object(
+                openalex_sdg, "fetch_openalex_records", return_value=([openalex], 1)
+            ),
+            patch.object(
+                openalex_sdg, "fetch_dspace_records", return_value=([dspace], 1)
+            ),
+        ):
+            rows, stats = openalex_sdg.fetch_publications_with_sdg(
+                include_openalex=True,
+                dspace_sources=[
+                    DSpaceSource(
+                        id="example",
+                        label="Example Repository",
+                        base_url="https://repo.example/server/api",
+                        entity_types=("Article",),
+                    )
+                ],
+                institution_id="https://openalex.org/I1",
+                from_date="2023-01-01",
+                to_date="2026-08-31",
+                work_type="article",
+                model="skip",
+                limit_rows=1,
+                enable_google_scholar=False,
+            )
+
+        self.assertEqual(stats.total_source_records, 2)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["source"], "example")
 
     def test_legacy_cache_is_copied_additively(self) -> None:
         conn = sqlite3.connect(cache_db.DB_PATH)
@@ -545,6 +750,60 @@ class CacheMigrationTests(unittest.TestCase):
             )
             self.assertEqual(second_rows[0]["sdg_formatted"], "90% SDG 4 (Quality Education)")
             classify.assert_not_called()
+
+    def test_richer_cached_abstract_is_used_instead_of_shorter_source_text(self) -> None:
+        source_publication = normalize_openalex_work(
+            {
+                "id": "https://openalex.org/W-RICHER",
+                "title": "Preserve richer abstract",
+                "publication_date": "2024-01-01",
+                "doi": "10.1234/richer",
+                "type": "article",
+                "abstract_inverted_index": {"Short": [0], "abstract": [1]},
+                "authorships": [],
+            }
+        )
+        source_publication = deduplicate_publications([source_publication])[0]
+        richer_abstract = (
+            "This substantially richer cached abstract must remain the classification input."
+        )
+        cached_publication = dict(source_publication)
+        cached_publication["abstract"] = richer_abstract
+        cache_db.upsert_work(cached_publication)
+        prediction = {
+            "predictions": [
+                {"sdg": {"code": "4", "name": "Quality Education"}, "prediction": 0.9}
+            ]
+        }
+        cache_db.upsert_sdg_result(
+            publication_key=source_publication["publication_key"],
+            model="aurora-sdg-multi",
+            sdg_response=prediction,
+            sdg_formatted="90% SDG 4 (Quality Education)",
+            text_hash=openalex_sdg._hash_classification_text(richer_abstract),
+        )
+
+        with (
+            patch.object(
+                openalex_sdg,
+                "fetch_openalex_records",
+                return_value=([source_publication], 1),
+            ),
+            patch.object(openalex_sdg, "classify_text_aurora") as classify,
+        ):
+            rows, _ = openalex_sdg.fetch_publications_with_sdg(
+                include_openalex=True,
+                dspace_sources=[],
+                institution_id="https://openalex.org/I1",
+                from_date="2023-01-01",
+                to_date="2026-08-31",
+                work_type="article",
+                model="aurora-sdg-multi",
+                enable_google_scholar=False,
+            )
+
+        self.assertEqual(rows[0]["abstract"], richer_abstract)
+        classify.assert_not_called()
 
     def test_transient_classification_failure_is_retried(self) -> None:
         publication = normalize_openalex_work(

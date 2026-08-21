@@ -22,6 +22,7 @@ OPENALEX_PER_PAGE = 200
 DSpaceProgressHook = Optional[Callable[[str], None]]
 CancelCheck = Optional[Callable[[], bool]]
 OPEN_OA_STATUSES = {"diamond", "gold", "hybrid", "green", "bronze", "open"}
+DSPACE_ABSTRACT_PREFIXES = ("dc.abstract", "dc.description.abstract")
 
 
 class SourceFetchCancelled(Exception):
@@ -146,9 +147,19 @@ def _extract_doi(metadata: Mapping[str, Any]) -> str:
 def _abstract_from_metadata(metadata: Mapping[str, Any], language: str) -> str:
     ordered_keys: List[str] = []
     if language:
-        ordered_keys.append(f"dc.abstract.{language.lower()}")
-    ordered_keys.extend(["dc.abstract.en", "dc.abstract.pl", "dc.abstract.author", "dc.abstract"])
-    abstract_keys = sorted(key for key in metadata if key.startswith("dc.abstract"))
+        ordered_keys.extend(
+            f"{prefix}.{language.lower()}" for prefix in DSPACE_ABSTRACT_PREFIXES
+        )
+    for suffix in ("en", "pl", "author", ""):
+        ordered_keys.extend(
+            f"{prefix}.{suffix}" if suffix else prefix
+            for prefix in DSPACE_ABSTRACT_PREFIXES
+        )
+    abstract_keys = sorted(
+        key
+        for key in metadata
+        if any(key == prefix or key.startswith(f"{prefix}.") for prefix in DSPACE_ABSTRACT_PREFIXES)
+    )
     ordered_keys.extend(key for key in abstract_keys if key not in ordered_keys)
     for key in ordered_keys:
         values = _metadata_values(metadata, key)
@@ -464,6 +475,7 @@ def fetch_dspace_records(
     headers = {"User-Agent": user_agent, "Accept": "application/hal+json, application/json"}
     for entity_type in _entity_types_for_work_type(source, work_type):
         page = 0
+        entity_record_count = 0
         while True:
             _ensure_not_cancelled(cancel_check)
             if progress_callback:
@@ -492,14 +504,17 @@ def fetch_dspace_records(
                 if work_type and normalized.get("type") != work_type:
                     continue
                 records.append(normalized)
-                if limit_rows is not None and len(records) >= limit_rows:
-                    return records, total_expected
+                entity_record_count += 1
+                if limit_rows is not None and entity_record_count >= limit_rows:
+                    break
             total_pages = int(page_info.get("totalPages") or 0)
             page += 1
-            if not objects or page >= total_pages:
+            if (
+                not objects
+                or page >= total_pages
+                or (limit_rows is not None and entity_record_count >= limit_rows)
+            ):
                 break
-        if limit_rows is not None and len(records) >= limit_rows:
-            break
     return records, total_expected
 
 
