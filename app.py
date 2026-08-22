@@ -1406,8 +1406,18 @@ def render_source_selector(
     st.header("Query setup", divider="rainbow")
     st.subheader("1. Publication sources", divider="violet")
     option_labels = {"openalex": "OpenAlex"}
-    option_labels.update({f"dspace:{source.id}": source.label for source in dspace_sources})
-    option_labels.update({f"oai:{source.id}": source.label for source in oai_sources})
+    repository_options = sorted(
+        [
+            (f"dspace:{source.id}", source.label)
+            for source in dspace_sources
+        ]
+        + [
+            (f"oai:{source.id}", source.label)
+            for source in oai_sources
+        ],
+        key=lambda option: option[1].casefold(),
+    )
+    option_labels.update(repository_options)
     selected_keys = st.multiselect(
         "Sources to query",
         options=list(option_labels),

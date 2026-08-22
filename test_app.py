@@ -407,6 +407,13 @@ class AppStateTests(unittest.TestCase):
         self.assertIn("Artistic works", app.multiselect[1].options)
         self.assertIn("Software", app.multiselect[1].options)
 
+    def test_repository_sources_are_sorted_alphabetically(self) -> None:
+        app = AppTest.from_file("app.py").run(timeout=30)
+
+        source_options = app.multiselect[0].options
+        self.assertEqual(source_options[0], "OpenAlex")
+        self.assertEqual(source_options[1:], sorted(source_options[1:], key=str.casefold))
+
     def test_selecting_viadrina_oai_source_uses_configured_institution(self) -> None:
         app = AppTest.from_file("app.py").run(timeout=30)
         app.multiselect[0].set_value(["openalex", "oai:viadrina-opus"])
