@@ -3,10 +3,41 @@
 
 [[dspace_sources]]
 id = "swps-share"
-label = "SWPS SHARE"
+label = "SWPS SHARE (Uniwersytet SWPS)"
 base_url = "https://share.swps.edu.pl/server/api"
 configuration = "default"
 enabled = true
 openalex_institution_id = "https://openalex.org/I36685595"
 ror_id = "https://ror.org/0407f1r36"
+entity_types = ["Article", "Book", "Artistic"]
+
+[[dspace_sources]]
+id = "mruni-cris"
+label = "MRU CRIS (Mykolas Romeris University)"
+base_url = "https://cris.mruni.eu/server/api"
+configuration = "default"
+enabled = true
+openalex_institution_id = "https://openalex.org/I146583814"
+ror_id = "https://ror.org/0052k0e03"
+entity_types = ["Article", "Book", "Artistic"]
+
+[[dspace_sources]]
+id = "aegean-hellanicus"
+label = "Hellanicus Repository (University of the Aegean)"
+base_url = "https://hellanicus-api.lib.aegean.gr/server/api"
+configuration = "default"
+enabled = true
+openalex_institution_id = "https://openalex.org/I98805295"
+ror_id = "https://ror.org/03zsp3p94"
+entity_types = ["Article", "Book", "Artistic"]
+
+# This REST API is legacy
+[[dspace_sources]]
+id = "ulpgc-accedacris"
+label = "AccedaCRIS (Universidad de Las Palmas de Gran Canaria)"
+base_url = "https://accedacris.ulpgc.es/rest"
+configuration = "default"
+enabled = false
+openalex_institution_id = "https://openalex.org/I119635470"
+ror_id = "https://ror.org/01teme464"
 entity_types = ["Article", "Book", "Artistic"]
