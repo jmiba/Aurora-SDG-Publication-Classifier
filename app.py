@@ -1924,6 +1924,14 @@ def render_fetch_summary(
             "`semantic_scholar_api_key` in `.streamlit/secrets.toml`.",
             icon=":material/key_off:",
         )
+    source_failures = getattr(stats, "source_failures", [])
+    if source_failures:
+        st.warning(
+            "Temporary server errors prevented fetching: "
+            f"{', '.join(source_failures)}. Other selected sources continued. "
+            "Try the fetch again later for the unavailable source.",
+            icon=":material/cloud_off:",
+        )
 
 
 def render_result_preview(

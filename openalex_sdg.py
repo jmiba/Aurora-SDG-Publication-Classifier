@@ -34,7 +34,7 @@ from publication_sources import (
     fetch_oai_records,
     fetch_openalex_records,
 )
-from request_utils import request_with_backoff
+from request_utils import RETRYABLE_STATUS_CODES, request_with_backoff
 
 # ------------------ CONFIG ------------------
 BASE_WORKS = "https://api.openalex.org/works"
@@ -99,6 +99,7 @@ class FetchStats:
     total_source_records: int = 0
     duplicates_removed: int = 0
     sources_queried: List[str] = field(default_factory=list)
+    source_failures: List[str] = field(default_factory=list)
     semantic_scholar_auth_error_status: Optional[int] = None
 
 
@@ -986,32 +987,46 @@ def fetch_publications_with_sdg(
 
             for source in dspace_sources:
                 stats.sources_queried.append(source.label)
-                records, _ = fetch_dspace_records(
-                    session,
-                    source,
-                    from_date=from_date,
-                    to_date=end_date,
-                    work_type=work_type,
-                    user_agent=user_agent,
-                    limit_rows=limit_rows,
-                    progress_callback=source_progress,
-                    cancel_check=cancel_check,
-                )
+                try:
+                    records, _ = fetch_dspace_records(
+                        session,
+                        source,
+                        from_date=from_date,
+                        to_date=end_date,
+                        work_type=work_type,
+                        user_agent=user_agent,
+                        limit_rows=limit_rows,
+                        progress_callback=source_progress,
+                        cancel_check=cancel_check,
+                    )
+                except requests.HTTPError as exc:
+                    status_code = exc.response.status_code if exc.response is not None else None
+                    if status_code not in RETRYABLE_STATUS_CODES:
+                        raise
+                    stats.source_failures.append(f"{source.label} (HTTP {status_code})")
+                    continue
                 source_records.extend(records)
 
             for oai_source in oai_sources:
                 stats.sources_queried.append(oai_source.label)
-                records, _ = fetch_oai_records(
-                    session,
-                    oai_source,
-                    from_date=from_date,
-                    to_date=end_date,
-                    work_type=work_type,
-                    user_agent=user_agent,
-                    limit_rows=limit_rows,
-                    progress_callback=source_progress,
-                    cancel_check=cancel_check,
-                )
+                try:
+                    records, _ = fetch_oai_records(
+                        session,
+                        oai_source,
+                        from_date=from_date,
+                        to_date=end_date,
+                        work_type=work_type,
+                        user_agent=user_agent,
+                        limit_rows=limit_rows,
+                        progress_callback=source_progress,
+                        cancel_check=cancel_check,
+                    )
+                except requests.HTTPError as exc:
+                    status_code = exc.response.status_code if exc.response is not None else None
+                    if status_code not in RETRYABLE_STATUS_CODES:
+                        raise
+                    stats.source_failures.append(f"{oai_source.label} (HTTP {status_code})")
+                    continue
                 source_records.extend(records)
         except SourceFetchCancelled as exc:
             raise FetchCancelled() from exc

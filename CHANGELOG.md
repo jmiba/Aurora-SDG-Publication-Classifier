@@ -7,6 +7,12 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Fixed
+
+- Transient OAI-PMH server failures now skip the unavailable source after
+  retries, continue fetching other selected sources, and report the failure in
+  the fetch summary.
+
 ## [1.1.1] - 2026-08-22
 
 ### Added
