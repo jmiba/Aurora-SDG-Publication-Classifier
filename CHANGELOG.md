@@ -7,6 +7,25 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-08-22
+
+### Added
+
+- Added MRU CRIS, the NBU Scholar Electronic Repository, and AccedaCRIS as
+  configured publication sources with verified OpenAlex and ROR identifiers.
+
+### Changed
+
+- Sorted configured repository sources alphabetically in the source selector,
+  while keeping OpenAlex first.
+
+### Fixed
+
+- Corrected the HAL OAI-PMH endpoint and switched AccedaCRIS from its
+  incompatible legacy DSpace REST entry to its OAI-PMH endpoint. The legacy
+  AccedaCRIS entry remains disabled because the service rejects automated
+  requests with HTTP 403.
+
 ## [1.1.0] - 2026-08-21
 
 ### Added
@@ -74,6 +93,7 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   tracked source tree.
 - Required a non-placeholder contact address before OpenAlex queries can run.
 
-[Unreleased]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/1.1.0...HEAD
+[Unreleased]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/1.1.1...HEAD
+[1.1.1]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/1.1.0...1.1.1
 [1.1.0]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/1.0.0...1.1.0
 [1.0.0]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/releases/tag/1.0.0
