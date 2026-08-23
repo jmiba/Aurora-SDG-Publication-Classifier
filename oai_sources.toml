@@ -28,6 +28,7 @@ label = "HAL (Université Paris 8)"
 base_url = "https://api.archives-ouvertes.fr/oai/hal/"
 metadata_prefix = "oai_dc"
 set = "collection:UNIV-PARIS8-OA"
+search_api_url = "https://api.archives-ouvertes.fr/search/"
 enabled = true
 openalex_institution_id = "https://openalex.org/I48825208"
 ror_id = "https://ror.org/04wez5e68"

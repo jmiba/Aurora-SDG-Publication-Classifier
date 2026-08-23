@@ -89,6 +89,7 @@ class OaiPmhSource:
     base_url: str
     metadata_prefix: str = "oai_dc"
     set_spec: Optional[str] = None
+    search_api_url: Optional[str] = None
     publication_types: Tuple[str, ...] = DEFAULT_OAI_PUBLICATION_TYPES
     openalex_institution_id: Optional[str] = None
     ror_id: Optional[str] = None
@@ -218,6 +219,8 @@ def parse_oai_sources(raw_sources: Any) -> List[OaiPmhSource]:
                 base_url=base_url,
                 metadata_prefix=metadata_prefix,
                 set_spec=str(values.get("set") or values.get("set_spec") or "").strip()
+                or None,
+                search_api_url=str(values.get("search_api_url") or "").strip().rstrip("/")
                 or None,
                 publication_types=publication_types or DEFAULT_OAI_PUBLICATION_TYPES,
                 openalex_institution_id=_valid_openalex_institution_id(
@@ -585,6 +588,106 @@ def normalize_oai_record(record: ET.Element, source: OaiPmhSource) -> Dict[str, 
     }
 
 
+def _hal_values(document: Mapping[str, Any], key: str) -> List[str]:
+    value = document.get(key)
+    values = value if isinstance(value, list) else [value]
+    return [_clean_text(item) for item in values if _clean_text(item)]
+
+
+def _hal_type(value: str) -> str:
+    mappings = {
+        "ART": "article",
+        "COMM": "proceedings-article",
+        "PROCEEDINGS": "proceedings-article",
+        "OUV": "book",
+        "COUV": "book-chapter",
+        "REPORT": "report",
+        "THESE": "dissertation",
+        "HDR": "dissertation",
+        "UNDEFINED": "preprint",
+        "DATA": "dataset",
+    }
+    return mappings.get(value.upper(), "other")
+
+
+def normalize_hal_document(document: Mapping[str, Any], source: OaiPmhSource) -> Dict[str, Any]:
+    """Normalize one HAL Search API document into the shared publication contract."""
+    identifier = _clean_text(document.get("docid"))
+    if not identifier:
+        return {}
+    title_values = _hal_values(document, "title_s")
+    dates = (
+        _hal_values(document, "publicationDate_tdate")
+        or _hal_values(document, "publicationDate_s")
+        or _hal_values(document, "producedDate_tdate")
+        or _hal_values(document, "producedDate_s")
+    )
+    authors = _hal_values(document, "authFullName_s")
+    institution_names = _hal_values(document, "structName_s")
+    institution_ids = _hal_values(document, "structId_i")
+    institution_countries = _hal_values(document, "structCountry_s")
+    affiliations = []
+    seen_affiliations = set()
+    for index, name in enumerate(institution_names):
+        institution_id = institution_ids[index] if index < len(institution_ids) else ""
+        key = institution_id or _normalize_match_text(name)
+        if not key or key in seen_affiliations:
+            continue
+        seen_affiliations.add(key)
+        affiliations.append(
+            {
+                "id": institution_id,
+                "name": name,
+                "country": (
+                    institution_countries[index].upper()
+                    if index < len(institution_countries)
+                    else ""
+                ),
+            }
+        )
+    doi_values = _hal_values(document, "doiId_s")
+    doi_token = next((normalize_doi(value) for value in doi_values if normalize_doi(value)), "")
+    uri_values = _hal_values(document, "uri_s")
+    type_values = _hal_values(document, "docType_s")
+    language_values = _hal_values(document, "language_s")
+    abstract_values = _hal_values(document, "abstract_s")
+    source_record_key = f"hal:{source.id}:{identifier}"
+    return {
+        "publication_key": source_record_key,
+        "source": source.id,
+        "source_label": source.label,
+        "source_record_id": identifier,
+        "source_record_key": source_record_key,
+        "record_url": uri_values[0] if uri_values else "",
+        "openalex_id": "",
+        "title": title_values[0] if title_values else "",
+        "publication_date": dates[0] if dates else "",
+        "doi": f"https://doi.org/{doi_token}" if doi_token else "",
+        "type": _hal_type(type_values[0] if type_values else ""),
+        "language": language_values[0] if language_values else "",
+        "is_oa": document.get("openAccess_bool")
+        if isinstance(document.get("openAccess_bool"), bool)
+        else None,
+        "oa_status": "open" if document.get("openAccess_bool") is True else "unknown",
+        "authors": "; ".join(dict.fromkeys(authors)),
+        "institutions": "; ".join(
+            dict.fromkeys(affiliation["name"] for affiliation in affiliations)
+        ),
+        "institution_ids": "; ".join(
+            affiliation["id"] for affiliation in affiliations if affiliation["id"]
+        ),
+        "institution_countries": "; ".join(
+            affiliation["country"] for affiliation in affiliations
+        ),
+        "institution_names_raw": "; ".join(
+            affiliation["name"] for affiliation in affiliations
+        ),
+        "institution_affiliations_json": json.dumps(affiliations, ensure_ascii=False),
+        "abstract": abstract_values[0] if abstract_values else "",
+        "_raw_record": dict(document),
+    }
+
+
 def _reconstruct_openalex_abstract(inverted_index: Any) -> str:
     """Rebuild abstract text from an OpenAlex ``abstract_inverted_index``.
 
@@ -852,6 +955,68 @@ def fetch_oai_records(
         )
         records = records[:limit_rows]
     return records, complete_list_size if complete_list_size is not None else len(records)
+
+
+def fetch_hal_records(
+    session: requests.Session,
+    source: OaiPmhSource,
+    *,
+    from_date: str,
+    to_date: str,
+    work_type: WorkTypeSelection,
+    user_agent: str,
+    limit_rows: Optional[int] = None,
+    page_size: int = 100,
+    progress_callback: DSpaceProgressHook = None,
+    cancel_check: CancelCheck = None,
+) -> Tuple[List[Dict[str, Any]], int]:
+    """Fetch one HAL Search API source with publication-date filtering."""
+    if not source.search_api_url or not source.set_spec:
+        raise ValueError(f"{source.label} has no HAL Search API scope configured")
+    collection = source.set_spec.removeprefix("collection:")
+    selected_types = set(_selected_work_types(work_type))
+    headers = {"User-Agent": user_agent, "Accept": "application/json"}
+    records: List[Dict[str, Any]] = []
+    page = 0
+    total_expected = 0
+    safe_page_size = min(max(page_size, 1), 1000)
+    while True:
+        _ensure_not_cancelled(cancel_check)
+        if progress_callback:
+            progress_callback(f"Fetching {source.label}: HAL page {page + 1}")
+        params: Dict[str, Any] = {
+            "q": "*:*",
+            "fq": (
+                f"collection_t:{collection} AND publicationDate_tdate:"
+                f"[{from_date}T00:00:00Z TO {to_date}T23:59:59Z]"
+            ),
+            "fl": (
+                "docid,title_s,publicationDate_tdate,publicationDate_s,producedDate_tdate,"
+                "producedDate_s,authFullName_s,docType_s,uri_s,doiId_s,language_s,abstract_s,"
+                "openAccess_bool,structName_s,structId_i,structCountry_s"
+            ),
+            "rows": safe_page_size,
+            "start": page * safe_page_size,
+            "sort": "publicationDate_tdate DESC",
+            "wt": "json",
+        }
+        data = _request_json(session, source.search_api_url, params=params, headers=headers)
+        response = data.get("response") or {}
+        if page == 0:
+            total_expected = int(response.get("numFound") or 0)
+        documents = response.get("docs") or []
+        for document in documents:
+            _ensure_not_cancelled(cancel_check)
+            normalized = normalize_hal_document(document, source)
+            if not normalized or (selected_types and normalized.get("type") not in selected_types):
+                continue
+            records.append(normalized)
+            if limit_rows is not None and len(records) >= limit_rows:
+                return records[:limit_rows], total_expected
+        page += 1
+        if not documents or page * safe_page_size >= total_expected:
+            break
+    return records, total_expected
 
 
 def fetch_openalex_records(
@@ -1163,6 +1328,7 @@ __all__ = [
     "deduplicate_publications",
     "end_of_month",
     "fetch_dspace_records",
+    "fetch_hal_records",
     "fetch_oai_records",
     "fetch_openalex_records",
     "normalize_doi",

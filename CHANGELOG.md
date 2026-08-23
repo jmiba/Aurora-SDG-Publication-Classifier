@@ -14,6 +14,9 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   the fetch summary.
 - Scoped the Paris 8 HAL OAI-PMH source to its institution-specific open-access
   collection, avoiding an unbounded harvest of the full HAL index.
+- Use HAL's Search API for Paris 8 queries so publication-date filters are
+  applied server-side and short periods do not require harvesting every OAI-PMH
+  page.
 
 ## [1.1.1] - 2026-08-22
 

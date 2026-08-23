@@ -21,6 +21,7 @@ from publication_sources import (
     deduplicate_publications,
     end_of_month,
     fetch_dspace_records,
+    fetch_hal_records,
     fetch_oai_records,
     normalize_dspace_object,
     normalize_oai_record,
@@ -214,6 +215,18 @@ class PublicationSourceTests(unittest.TestCase):
         self.assertEqual(sources[0].publication_types, ("article", "book-part"))
         self.assertEqual(sources[0].openalex_query_id, "https://openalex.org/I254029264")
 
+    def test_parse_hal_search_api_url(self) -> None:
+        source = parse_oai_sources(
+            {
+                "id": "paris8-hal",
+                "base_url": "https://example.org/oai",
+                "set": "collection:UNIV-PARIS8-OA",
+                "search_api_url": "https://example.org/search/",
+            }
+        )[0]
+
+        self.assertEqual(source.search_api_url, "https://example.org/search")
+
     def test_normalize_oai_dc_record(self) -> None:
         source = OaiPmhSource(
             id="viadrina-opus",
@@ -315,6 +328,55 @@ class PublicationSourceTests(unittest.TestCase):
             session.calls[1]["params"],
             {"verb": "ListRecords", "resumptionToken": "next-page"},
         )
+
+    def test_hal_search_harvest_filters_publication_dates_and_paginates(self) -> None:
+        source = OaiPmhSource(
+            id="paris8-hal",
+            label="Paris 8 HAL",
+            base_url="https://example.org/oai",
+            set_spec="collection:UNIV-PARIS8-OA",
+            search_api_url="https://example.org/search",
+        )
+        document = {
+            "docid": "123",
+            "title_s": ["A January publication"],
+            "publicationDate_s": "2023-01-15",
+            "authFullName_s": ["Doe, Jane"],
+            "docType_s": "ART",
+            "uri_s": "https://hal.science/hal-123",
+            "doiId_s": "10.1234/example",
+            "language_s": ["en"],
+            "abstract_s": ["An abstract."],
+            "openAccess_bool": True,
+            "structName_s": ["Université Paris 8"],
+            "structId_i": [11141],
+            "structCountry_s": ["fr"],
+        }
+        session = FakeSession(
+            [
+                {"response": {"numFound": 2, "docs": [document]}},
+                {"response": {"numFound": 2, "docs": [{"docid": "456", "title_s": ["Another publication"], "publicationDate_s": "2023-01-20", "docType_s": "OUV"}]}},
+            ]
+        )
+
+        records, total = fetch_hal_records(
+            session,
+            source,
+            from_date="2023-01-01",
+            to_date="2023-01-31",
+            work_type=None,
+            user_agent="test-agent",
+            page_size=1,
+        )
+
+        self.assertEqual(total, 2)
+        self.assertEqual([record["title"] for record in records], ["A January publication", "Another publication"])
+        self.assertEqual(records[0]["type"], "article")
+        self.assertEqual(records[0]["doi"], "https://doi.org/10.1234/example")
+        self.assertEqual(records[0]["institutions"], "Université Paris 8")
+        self.assertEqual(session.calls[0]["params"]["start"], 0)
+        self.assertIn("publicationDate_tdate:[2023-01-01T00:00:00Z TO 2023-01-31T23:59:59Z]", session.calls[0]["params"]["fq"])
+        self.assertEqual(session.calls[1]["params"]["start"], 1)
 
     def test_oai_harvest_rejects_repeated_resumption_token(self) -> None:
         source = OaiPmhSource(

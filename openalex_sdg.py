@@ -31,6 +31,7 @@ from publication_sources import (
     WorkTypeSelection,
     deduplicate_publications,
     fetch_dspace_records,
+    fetch_hal_records,
     fetch_oai_records,
     fetch_openalex_records,
 )
@@ -1010,7 +1011,8 @@ def fetch_publications_with_sdg(
             for oai_source in oai_sources:
                 stats.sources_queried.append(oai_source.label)
                 try:
-                    records, _ = fetch_oai_records(
+                    fetcher = fetch_hal_records if oai_source.search_api_url else fetch_oai_records
+                    records, _ = fetcher(
                         session,
                         oai_source,
                         from_date=from_date,

@@ -202,6 +202,11 @@ Configuration fields:
 
 The adapter follows every `resumptionToken`, recognizes OAI-PMH errors returned inside successful HTTP responses, skips persistent deletion tombstones, rejects DTD/entity declarations, and limits individual XML responses to 25 MiB. It extracts titles, creators, descriptions, publication dates, types, languages, rights, DOIs, and repository landing-page URLs without downloading linked files.
 
+The HAL Paris 8 source additionally uses HAL's Search API, configured with the
+optional `search_api_url` field. It filters `publicationDate_tdate` directly and
+uses `rows`/`start` pagination, avoiding a full OAI-PMH harvest for short
+publication periods. Other OAI-PMH sources continue to use the generic adapter.
+
 OAI-PMH date parameters filter the repository metadata datestamp—not `dc:date`. To preserve the app’s publication-period semantics, the adapter does not pass the selected period as OAI-PMH `from`/`until`; it filters normalized publication dates locally instead. This is correct but can make very large OAI-PMH repositories slower than APIs that support publication-date filtering directly.
 
 For an untracked local source, put the same `[[oai_sources]]` structure in `.streamlit/secrets.toml`. A local entry with the same `id` replaces the tracked entry; a new `id` adds another source. Only public, unauthenticated OAI-PMH endpoints are currently supported.
