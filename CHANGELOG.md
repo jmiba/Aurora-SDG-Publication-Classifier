@@ -7,6 +7,8 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [1.1.2] - 2026-08-24
+
 ### Fixed
 
 - Transient OAI-PMH server failures now skip the unavailable source after
@@ -17,6 +19,9 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 - Use HAL's Search API for Paris 8 queries so publication-date filters are
   applied server-side and short periods do not require harvesting every OAI-PMH
   page.
+- Normalized mixed timezone-aware and timezone-naive publication dates before
+  applying chart filters, preventing HAL Paris book-chapter queries from
+  failing while rendering the co-affiliation graph.
 
 ## [1.1.1] - 2026-08-22
 
@@ -104,7 +109,8 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   tracked source tree.
 - Required a non-placeholder contact address before OpenAlex queries can run.
 
-[Unreleased]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/1.1.1...HEAD
+[Unreleased]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/1.1.2...HEAD
+[1.1.2]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/1.1.1...1.1.2
 [1.1.1]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/1.1.0...1.1.1
 [1.1.0]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/1.0.0...1.1.0
 [1.0.0]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/releases/tag/1.0.0

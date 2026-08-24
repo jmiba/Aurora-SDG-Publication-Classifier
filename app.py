@@ -103,6 +103,8 @@ CSV_FIELDNAMES = [
 ]
 RESULT_SESSION_KEY = "fetch_result"
 RESULT_SCHEMA_VERSION = 3
+APP_VERSION = "1.1.2"
+APP_REPOSITORY_URL = "https://github.com/jmiba/Aurora-SDG-Publication-Classifier"
 SDG_THRESHOLD_PERCENT = 3.0
 OA_STATUS_ORDER = ["diamond", "gold", "hybrid", "green", "bronze", "open", "closed", "unknown"]
 OA_STATUS_COLORS = {
@@ -654,6 +656,26 @@ def _network_label_style(theme_type: str) -> Dict[str, Any]:
     }
 
 
+def _parse_mixed_timestamp(value: Any) -> pd.Timestamp:
+    """Parse a scalar date or datetime and return a timezone-naive timestamp."""
+    try:
+        timestamp = pd.to_datetime(value, errors="coerce", utc=True, format="mixed")
+    except TypeError:
+        timestamp = pd.to_datetime(value, errors="coerce", utc=True)
+    if pd.isna(timestamp):
+        return pd.NaT
+    return timestamp.tz_localize(None)
+
+
+def _parse_mixed_datetime_series(values: Any) -> pd.Series:
+    """Parse a date-like Series with mixed plain dates and timezone-aware strings."""
+    try:
+        parsed = pd.to_datetime(values, errors="coerce", utc=True, format="mixed")
+    except TypeError:
+        parsed = pd.to_datetime(values, errors="coerce", utc=True)
+    return cast(pd.Series, parsed).dt.tz_localize(None)
+
+
 def render_institution_network(
     rows: List[Dict[str, Any]],
     start_date: str,
@@ -674,13 +696,13 @@ def render_institution_network(
         st.info("No publications available to display the co-affiliation network.")
         return
 
-    start_dt = pd.to_datetime(start_date, errors="coerce")
-    end_dt = pd.to_datetime(end_date, errors="coerce")
+    start_dt = _parse_mixed_timestamp(start_date)
+    end_dt = _parse_mixed_timestamp(end_date)
     if pd.isna(start_dt) or pd.isna(end_dt):
         st.info("Unable to determine the selected time frame for the network.")
         return
     if "publication_date" in df.columns:
-        df["pub_date"] = pd.to_datetime(df["publication_date"], errors="coerce")
+        df["pub_date"] = _parse_mixed_datetime_series(df["publication_date"])
     else:
         df["pub_date"] = pd.NaT
     df = df.dropna(subset=["pub_date"])
@@ -1066,8 +1088,8 @@ def render_author_oa_chart(
         st.info("No publications available to display per-author OA status.")
         return
 
-    start_month = pd.to_datetime(start_date, errors="coerce")
-    end_month = pd.to_datetime(end_date, errors="coerce")
+    start_month = _parse_mixed_timestamp(start_date)
+    end_month = _parse_mixed_timestamp(end_date)
     if pd.isna(start_month) or pd.isna(end_month):
         st.info("Unable to determine the selected time frame for author distribution.")
         return
@@ -1077,7 +1099,7 @@ def render_author_oa_chart(
         start_month, end_month = end_month, start_month
 
     if "publication_date" in df.columns:
-        df["pub_date"] = pd.to_datetime(df["publication_date"], errors="coerce")
+        df["pub_date"] = _parse_mixed_datetime_series(df["publication_date"])
     else:
         df["pub_date"] = pd.NaT
     if df["pub_date"].isna().all() and "publication_year" in df.columns:
@@ -1182,8 +1204,8 @@ def render_oa_status_chart(rows: List[Dict[str, Any]], start_date: str, end_date
         st.info("No publications available in the selected time frame.")
         return
 
-    start_month = pd.to_datetime(start_date, errors="coerce")
-    end_month = pd.to_datetime(end_date, errors="coerce")
+    start_month = _parse_mixed_timestamp(start_date)
+    end_month = _parse_mixed_timestamp(end_date)
     if pd.isna(start_month) or pd.isna(end_month):
         st.info("Unable to determine the selected time frame.")
         return
@@ -1193,7 +1215,7 @@ def render_oa_status_chart(rows: List[Dict[str, Any]], start_date: str, end_date
         start_month, end_month = end_month, start_month
 
     if "publication_date" in df.columns:
-        df["pub_date"] = pd.to_datetime(df["publication_date"], errors="coerce")
+        df["pub_date"] = _parse_mixed_datetime_series(df["publication_date"])
     else:
         df["pub_date"] = pd.NaT
     if df["pub_date"].isna().all() and "publication_year" in df.columns:
@@ -1278,8 +1300,8 @@ def render_publication_type_chart(rows: List[Dict[str, Any]], start_date: str, e
         st.info("No publications available to display publication types.")
         return
 
-    start_month = pd.to_datetime(start_date, errors="coerce")
-    end_month = pd.to_datetime(end_date, errors="coerce")
+    start_month = _parse_mixed_timestamp(start_date)
+    end_month = _parse_mixed_timestamp(end_date)
     if pd.isna(start_month) or pd.isna(end_month):
         st.info("Unable to determine the selected time frame to calculate publication types.")
         return
@@ -1289,7 +1311,7 @@ def render_publication_type_chart(rows: List[Dict[str, Any]], start_date: str, e
         start_month, end_month = end_month, start_month
 
     if "publication_date" in df.columns:
-        df["pub_date"] = pd.to_datetime(df["publication_date"], errors="coerce")
+        df["pub_date"] = _parse_mixed_datetime_series(df["publication_date"])
     else:
         df["pub_date"] = pd.NaT
     if df["pub_date"].isna().all() and "publication_year" in df.columns:
@@ -2173,6 +2195,9 @@ def main() -> None:
     """Streamlit entry point that wires all widgets, fetch flow, and previews."""
     st.set_page_config(page_title="Aurora SDG Publication Classifier", layout="wide")
     st.title("Aurora SDG Publication Classifier")
+    st.caption(
+        f"Version {APP_VERSION} | [Get help on GitHub]({APP_REPOSITORY_URL})"
+    )
     st.caption(
         "Fetch and deduplicate publications from OpenAlex, DSpace, and OAI-PMH "
         "repositories, relate them to the 17 UN Sustainable Development Goals "
