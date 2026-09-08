@@ -7,6 +7,39 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Changed
+
+- Run publication fetches in a background worker and poll their locked progress
+  from a Streamlit fragment, so the Cancel button can signal a running fetch.
+- Limit the publication-focus selector to the current preview page or at most
+  100 title, author, and DOI search matches instead of building one option for
+  every result row.
+- Treat OAI-PMH protocol errors from one endpoint like retryable HTTP source
+  failures: report the unavailable source and continue with the remaining
+  selected sources. Local source configuration errors still stop the run.
+- Reserve Aurora request slots while locked but sleep outside the rate-limiter
+  lock, allowing enrichment workers to wait independently.
+- Split the DSpace row limit across the selected entity types so one source no
+  longer over-fetches by the number of entity types.
+- Require Streamlit 1.49 or newer, the minimum version that supports the
+  scoped rerun used by the live fetch progress panel.
+
+### Fixed
+
+- Guard the one-time Open Access consistency repair with a cache metadata
+  marker and serialize first-time SQLite connection initialization.
+- Keep the background fetch job registry in a dedicated imported module so
+  Streamlit's per-rerun script re-execution no longer orphans a running
+  fetch with a "background fetch state is unavailable" error.
+- Reach 100% progress when a completed source returns fewer rows than the
+  requested limit, URL-encode Semantic Scholar DOI path values, and distinguish
+  invalid Aurora JSON from HTTP errors.
+
+### Removed
+
+- Removed unused authorship, author-token, single-origin network, and defensive
+  OpenAlex artistic-work code paths.
+
 ## [1.1.3] - 2026-09-08
 
 ### Changed

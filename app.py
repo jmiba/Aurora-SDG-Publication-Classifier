@@ -30,6 +30,7 @@ import plotly.graph_objects as go
 import requests
 import streamlit as st
 
+from fetch_jobs import discard_fetch_job, get_fetch_job, start_fetch_job
 from openalex_sdg import (
     AURORA_MODELS,
     DEFAULT_USER_AGENT,
@@ -107,6 +108,8 @@ APP_VERSION = "1.1.3"
 APP_REPOSITORY_URL = "https://github.com/jmiba/Aurora-SDG-Publication-Classifier"
 MAX_EXPORT_FILENAME_LENGTH = 150
 SDG_THRESHOLD_PERCENT = 3.0
+FETCH_POLL_INTERVAL_SECONDS = 0.5
+FETCH_JOB_SESSION_KEY = "fetch_job_id"
 OA_STATUS_ORDER = ["diamond", "gold", "hybrid", "green", "bronze", "open", "closed", "unknown"]
 OA_STATUS_COLORS = {
     "diamond": "#7dd3fc",
@@ -141,6 +144,8 @@ class QuerySelection:
     serpapi_api_key: Optional[str]
     aurora_base_url: Optional[str]
     oai_sources: Tuple[OaiPmhSource, ...] = ()
+
+
 SDG_COLORS = {
     "1": "#e5243b",   # No Poverty
     "2": "#dda63a",   # Zero Hunger
@@ -585,19 +590,6 @@ def _build_sphere_mesh(
                 geometry.j.extend([upper, upper])
                 geometry.k.extend([lower_next, upper_next])
     return geometry
-
-
-def _network_edge_groups(
-    edge_counts: Mapping[Tuple[str, str], int],
-    selected_label: str,
-    min_secondary_weight: int,
-) -> Tuple[Dict[Tuple[str, str], int], List[Tuple[Tuple[str, str], int]]]:
-    """Split origin links from ranked links between the origin's partners."""
-    return _network_edge_groups_for_origins(
-        edge_counts,
-        {selected_label},
-        min_secondary_weight,
-    )
 
 
 def _network_edge_groups_for_origins(
@@ -1735,7 +1727,7 @@ def render_advanced_options(
     if not months:
         months = [today]
     labels = [dt.strftime("%B %Y") for dt in months]
-    label_to_date = dict(zip(labels, months))
+    label_to_date = dict(zip(labels, months, strict=True))
     desired_start = date(today.year - 2, 1, 1)
     start_default_date = next((m for m in months if m >= desired_start), months[-1])
     start_default_label = labels[months.index(start_default_date)]
@@ -1824,8 +1816,13 @@ def request_cancel_for_changed_params(
 
 
 def request_fetch_cancel(state: MutableMapping[str, Any]) -> None:
-    """Set the cooperative cancellation flag for the active fetch."""
+    """Set both UI and worker cancellation signals for the active fetch."""
     state["fetch_cancel_requested"] = True
+    job_id = state.get(FETCH_JOB_SESSION_KEY)
+    if isinstance(job_id, str):
+        job = get_fetch_job(job_id)
+        if job is not None:
+            job.cancel_event.set()
 
 
 def invalidate_stale_result(
@@ -1859,6 +1856,35 @@ def begin_fetch(
     state["fetch_params"] = dict(current_params)
     state["fetch_cancel_requested"] = False
     state["fetch_in_progress"] = True
+    state.pop("fetch_terminal_notice", None)
+
+
+def fetch_progress_fraction(
+    done: int,
+    expected: Optional[int],
+    limit_rows: Optional[int],
+    message: str,
+) -> float:
+    """Return bounded UI progress, treating the terminal callback as complete."""
+    if message == "Completed":
+        return 1.0
+    target = expected if expected is not None else limit_rows
+    if not target:
+        return 0.0
+    return min(max(done / target, 0.0), 1.0)
+
+
+def fetch_terminal_notice(error: Exception) -> Tuple[str, str]:
+    """Convert worker exceptions into the existing user-facing error categories."""
+    if isinstance(error, FetchCancelled):
+        return "info", "Fetch cancelled."
+    if isinstance(error, requests.HTTPError):
+        return "error", f"Request failed: {error}"
+    if isinstance(error, requests.RequestException):
+        return "error", f"Network error: {error}"
+    if isinstance(error, ValueError):
+        return "error", f"Source configuration or response error: {error}"
+    return "error", f"Unexpected fetch error: {error}"
 
 
 def execute_publication_fetch(
@@ -1924,19 +1950,76 @@ def execute_publication_fetch(
     }
 
 
-def _reset_fetch_state(
-    progress_bar: Any,
-    progress_text: Any,
-    progress_detail: Any,
-    cancel_container: Any,
-) -> None:
-    """Clear progress UI placeholders and reset fetch session flags."""
-    progress_bar.empty()
-    progress_text.empty()
-    progress_detail.empty()
-    cancel_container.empty()
+def _reset_fetch_state() -> None:
+    """Reset the Streamlit flags associated with a background fetch."""
     st.session_state["fetch_in_progress"] = False
     st.session_state["fetch_cancel_requested"] = False
+    st.session_state.pop(FETCH_JOB_SESSION_KEY, None)
+
+
+@st.fragment(run_every=FETCH_POLL_INTERVAL_SECONDS)
+def render_active_fetch(limit_rows: Optional[int]) -> None:
+    """Poll and render one background job without rerunning the whole app."""
+    job_id = st.session_state.get(FETCH_JOB_SESSION_KEY)
+    job = get_fetch_job(job_id) if isinstance(job_id, str) else None
+    if job is None:
+        _reset_fetch_state()
+        st.session_state["fetch_terminal_notice"] = (
+            "error",
+            "The background fetch state is unavailable. Start the fetch again.",
+        )
+        st.rerun(scope="app")
+    active_job_id = cast(str, job_id)
+
+    if st.button(
+        "Cancel fetch",
+        type="secondary",
+        key="cancel_fetch_button",
+        disabled=job.cancel_event.is_set(),
+    ):
+        request_fetch_cancel(cast(MutableMapping[str, Any], st.session_state))
+        st.toast("Cancelling fetch…", icon=":material/stop_circle:")
+
+    snapshot = job.snapshot()
+    progress = fetch_progress_fraction(
+        snapshot.progress_done,
+        snapshot.progress_expected,
+        limit_rows,
+        snapshot.progress_message,
+    )
+    st.progress(progress)
+    if snapshot.progress_expected is not None:
+        st.text(
+            f"Processed {snapshot.progress_done:,} of "
+            f"{snapshot.progress_expected:,} works"
+        )
+    elif limit_rows:
+        st.text(
+            f"Processed {snapshot.progress_done:,} of {limit_rows:,} requested works"
+        )
+    else:
+        st.text(f"Processed {snapshot.progress_done:,} works")
+    st.text(f"Currently processing: {snapshot.progress_message}")
+
+    if not snapshot.done:
+        return
+
+    discard_fetch_job(active_job_id)
+    _reset_fetch_state()
+    if snapshot.error is not None:
+        st.session_state["fetch_terminal_notice"] = fetch_terminal_notice(
+            snapshot.error
+        )
+    elif snapshot.result_payload is not None:
+        st.session_state[RESULT_SESSION_KEY] = snapshot.result_payload
+        st.session_state.pop("preview_focus_index", None)
+        st.session_state["preview_page"] = 1
+    else:
+        st.session_state["fetch_terminal_notice"] = (
+            "error",
+            "The fetch ended without a result.",
+        )
+    st.rerun(scope="app")
 
 
 def _result_payload_matches_params(
@@ -2007,11 +2090,37 @@ def render_fetch_summary(
     source_failures = getattr(stats, "source_failures", [])
     if source_failures:
         st.warning(
-            "Temporary server errors prevented fetching: "
+            "Some sources could not be fetched: "
             f"{', '.join(source_failures)}. Other selected sources continued. "
-            "Try the fetch again later for the unavailable source.",
+            "Check the source response or try the fetch again later.",
             icon=":material/cloud_off:",
         )
+
+
+def focus_candidate_indices(
+    rows: Sequence[Mapping[str, Any]],
+    query: str,
+    *,
+    page_start: int,
+    page_size: int,
+    max_matches: int = 100,
+) -> List[int]:
+    """Return bounded focus choices from the current page or a text search."""
+    normalized_query = " ".join(query.casefold().split())
+    if not normalized_query:
+        return list(range(page_start, min(len(rows), page_start + page_size)))
+
+    tokens = normalized_query.split()
+    matches: List[int] = []
+    for index, row in enumerate(rows):
+        searchable = " ".join(
+            str(row.get(field) or "") for field in ("title", "display_name", "authors", "doi")
+        ).casefold()
+        if all(token in searchable for token in tokens):
+            matches.append(index)
+            if len(matches) >= max_matches:
+                break
+    return matches
 
 
 def render_result_preview(
@@ -2108,28 +2217,56 @@ def render_result_preview(
     )
     st.caption(f"Showing page {current_page} of {total_pages}.")
 
-    dropdown_options = ["0 — All publications"]
-    for index, row in enumerate(all_rows):
+    focus_query = st.text_input(
+        "Search publications to focus",
+        key="preview_focus_search",
+        help=(
+            "Leave blank to choose from the current preview page, or search "
+            "titles, authors, and DOIs. At most 100 matches are shown."
+        ),
+    )
+    candidate_indices = focus_candidate_indices(
+        all_rows,
+        focus_query,
+        page_start=start_index,
+        page_size=PREVIEW_PAGE_SIZE,
+    )
+    previous_focus = st.session_state.get("preview_focus_index")
+    focus_options: List[Optional[int]] = [None, *candidate_indices]
+    if (
+        isinstance(previous_focus, int)
+        and 0 <= previous_focus < total_rows
+        and previous_focus not in focus_options
+    ):
+        focus_options.insert(1, previous_focus)
+
+    def focus_label(index: Optional[int]) -> str:
+        if index is None:
+            return "All publications"
+        row = all_rows[index]
         title_preview = (
             row.get("title") or row.get("display_name") or "(no title)"
         )[:80]
         authors_preview = abbreviate_authors(row.get("authors") or "")
         label = f"{index + 1} — {title_preview}"
-        if authors_preview:
-            label = f"{index + 1} — {authors_preview}, {title_preview}"
-        dropdown_options.append(label)
+        return (
+            f"{index + 1} — {authors_preview}, {title_preview}"
+            if authors_preview
+            else label
+        )
 
     dropdown_default = (
-        0 if selected_index is None else min(max(0, selected_index + 1), total_rows)
+        focus_options.index(previous_focus)
+        if previous_focus in focus_options
+        else 0
     )
-    previous_focus = st.session_state.get("preview_focus_index")
     selected_option = st.selectbox(
         "Focus publication",
-        options=list(range(len(dropdown_options))),
-        format_func=lambda index: dropdown_options[index],
+        options=focus_options,
+        format_func=focus_label,
         index=dropdown_default,
     )
-    selected_index = selected_option - 1 if selected_option > 0 else None
+    selected_index = selected_option if isinstance(selected_option, int) else None
     if selected_index != previous_focus:
         st.session_state["preview_focus_index"] = selected_index
         st.rerun()
@@ -2144,7 +2281,7 @@ def render_result_preview(
         selected_title = (
             f"{author_info}, {title_info}" if author_info else str(title_info)
         )
-    st.caption("Select a publication above (0 = All).")
+    st.caption("Select a publication above, or keep All publications selected.")
     return chart_rows, selected_title
 
 
@@ -2353,7 +2490,7 @@ def main() -> None:
     if not publication_types:
         st.info("Select at least one publication type to continue.")
         return
-    
+
     st.write("")
     st.divider()
     st.header("Run query and preview results", divider="rainbow")
@@ -2401,111 +2538,44 @@ def main() -> None:
     for message in configuration_errors:
         st.error(message)
 
-    cancel_button_placeholder = st.empty()
+    terminal_notice = st.session_state.pop("fetch_terminal_notice", None)
+    if (
+        isinstance(terminal_notice, tuple)
+        and len(terminal_notice) == 2
+        and all(isinstance(value, str) for value in terminal_notice)
+    ):
+        level, message = terminal_notice
+        if level == "info":
+            st.info(message, icon=":material/stop_circle:")
+        else:
+            st.error(message)
 
     run_button_clicked = st.button(
         "Fetch works and build CSV",
         type="primary",
         key="main_fetch_button",
-        disabled=bool(configuration_errors),
+        disabled=bool(configuration_errors)
+        or bool(st.session_state.get("fetch_in_progress")),
     )
     if run_button_clicked:
         begin_fetch(fetch_state, current_params)
-        st.rerun()
-
-    # This block handles rendering the cancel button and the actual fetch logic
-    if st.session_state.get("fetch_in_progress"):
-        # Render the cancel button inside its dedicated placeholder
-        if cancel_button_placeholder.button("Cancel fetch", type="secondary", key="cancel_fetch_button"):
-            request_fetch_cancel(fetch_state)
-            st.toast("Cancelling fetch…", icon=":material/stop_circle:")
-
-        progress_bar = st.progress(0)
-        progress_text = st.empty()
-        progress_detail = st.empty()
-        current_detail: str = ""
-
-        def progress_callback(done: int, expected: Optional[int], message: str) -> None:
-            nonlocal current_detail
-            target = limit_rows or expected
-            fraction = min(done / target, 1.0) if target else 0.0
-            progress_bar.progress(fraction)
-            if expected:
-                status = f"Processed {done:,} of {expected:,} works"
-            elif limit_rows:
-                status = f"Processed {done:,} of {limit_rows:,} requested works"
-            else:
-                status = f"Processed {done:,} works"
-            if message:
-                current_detail = message
-            if current_detail:
-                progress_detail.text(f"Currently processing: {current_detail}")
-            else:
-                progress_detail.empty()
-            progress_text.text(status)
-
-        def cancel_check() -> bool:
-            return bool(st.session_state.get("fetch_cancel_requested"))
-
-        with st.spinner("Fetching selected sources and contacting Aurora as needed…"):
-            try:
-                result_payload = execute_publication_fetch(
-                    selection,
-                    progress_callback=progress_callback,
-                    cancel_check=cancel_check,
-                )
-            except FetchCancelled:
-                _reset_fetch_state(
-                    progress_bar,
-                    progress_text,
-                    progress_detail,
-                    cancel_button_placeholder,
-                )
-                st.info("Fetch cancelled.", icon=":material/stop_circle:")
-                return
-            except requests.HTTPError as exc:
-                _reset_fetch_state(
-                    progress_bar,
-                    progress_text,
-                    progress_detail,
-                    cancel_button_placeholder,
-                )
-                st.error(f"Request failed: {exc}")
-                return
-            except requests.RequestException as exc:
-                _reset_fetch_state(
-                    progress_bar,
-                    progress_text,
-                    progress_detail,
-                    cancel_button_placeholder,
-                )
-                st.error(f"Network error: {exc}")
-                return
-            except ValueError as exc:
-                _reset_fetch_state(
-                    progress_bar,
-                    progress_text,
-                    progress_detail,
-                    cancel_button_placeholder,
-                )
-                st.error(f"Source configuration or response error: {exc}")
-                return
-
-        _reset_fetch_state(
-            progress_bar,
-            progress_text,
-            progress_detail,
-            cancel_button_placeholder,
+        fetch_state[FETCH_JOB_SESSION_KEY] = start_fetch_job(
+            lambda job: execute_publication_fetch(
+                selection,
+                progress_callback=job.publish_progress,
+                cancel_check=job.cancel_event.is_set,
+            )
         )
-        st.session_state[RESULT_SESSION_KEY] = result_payload
-        st.session_state.pop("preview_focus_index", None)
-        st.session_state["preview_page"] = 1
         st.rerun()
+
+    if st.session_state.get("fetch_in_progress"):
+        render_active_fetch(limit_rows)
+        return
 
     elif not result_payload:
         if result_invalidated:
             st.info("Query settings changed. Fetch again to build results for the current settings.")
-        else:
+        elif terminal_notice is None:
             st.info("Click the button above to fetch publications.")
         return
 

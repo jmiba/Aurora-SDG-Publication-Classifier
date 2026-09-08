@@ -48,6 +48,10 @@ class SourceFetchCancelled(Exception):
     """Raised when a source fetch is cancelled by the caller."""
 
 
+class OaiPmhProtocolError(ValueError):
+    """Raised when an OAI-PMH endpoint returns an invalid protocol response."""
+
+
 def end_of_month(value: date) -> date:
     """Return the final calendar day of the month containing value."""
     return value.replace(day=calendar.monthrange(value.year, value.month)[1])
@@ -918,11 +922,15 @@ def fetch_oai_records(
             if code == "noRecordsMatch":
                 return [], 0
             message = _clean_text(error.text) or "Unspecified OAI-PMH error"
-            raise ValueError(f"{source.label} returned OAI-PMH {code}: {message}")
+            raise OaiPmhProtocolError(
+                f"{source.label} returned OAI-PMH {code}: {message}"
+            )
 
         list_records = root.find(f"{{{OAI_NAMESPACE}}}ListRecords")
         if list_records is None:
-            raise ValueError(f"{source.label} returned no OAI-PMH ListRecords payload")
+            raise OaiPmhProtocolError(
+                f"{source.label} returned no OAI-PMH ListRecords payload"
+            )
         for record_element in list_records.findall(f"{{{OAI_NAMESPACE}}}record"):
             _ensure_not_cancelled(cancel_check)
             normalized = normalize_oai_record(record_element, source)
@@ -945,7 +953,9 @@ def fetch_oai_records(
         if not resumption_token:
             break
         if resumption_token in seen_tokens:
-            raise ValueError(f"{source.label} repeated an OAI-PMH resumption token")
+            raise OaiPmhProtocolError(
+                f"{source.label} repeated an OAI-PMH resumption token"
+            )
         seen_tokens.add(resumption_token)
 
     if limit_rows is not None:
@@ -1030,9 +1040,6 @@ def fetch_openalex_records(
     cancel_check: CancelCheck = None,
 ) -> Tuple[List[Dict[str, Any]], Optional[int]]:
     """Fetch and normalize OpenAlex records without enrichment or classification."""
-    selected_types = _selected_work_types(work_type)
-    if selected_types == ("artistic-work",):
-        return [], 0
     params: Dict[str, Any] = {
         "filter": filter_value,
         "select": "id,display_name,title,publication_date,doi,abstract_inverted_index,type,language,open_access,authorships",
@@ -1110,7 +1117,13 @@ def fetch_dspace_records(
     total_expected = 0
     selected_types = set(_selected_work_types(work_type))
     headers = {"User-Agent": user_agent, "Accept": "application/hal+json, application/json"}
-    for entity_type in _entity_types_for_work_type(source, work_type):
+    entity_types = _entity_types_for_work_type(source, work_type)
+    per_type_limit = (
+        -(-limit_rows // len(entity_types))
+        if limit_rows is not None and entity_types
+        else None
+    )
+    for entity_type in entity_types:
         page = 0
         entity_record_count = 0
         while True:
@@ -1142,14 +1155,14 @@ def fetch_dspace_records(
                     continue
                 records.append(normalized)
                 entity_record_count += 1
-                if limit_rows is not None and entity_record_count >= limit_rows:
+                if per_type_limit is not None and entity_record_count >= per_type_limit:
                     break
             total_pages = int(page_info.get("totalPages") or 0)
             page += 1
             if (
                 not objects
                 or page >= total_pages
-                or (limit_rows is not None and entity_record_count >= limit_rows)
+                or (per_type_limit is not None and entity_record_count >= per_type_limit)
             ):
                 break
     return records, total_expected
@@ -1323,6 +1336,7 @@ def deduplicate_publications(records: Sequence[Mapping[str, Any]]) -> List[Dict[
 
 __all__ = [
     "DSpaceSource",
+    "OaiPmhProtocolError",
     "OaiPmhSource",
     "SourceFetchCancelled",
     "deduplicate_publications",

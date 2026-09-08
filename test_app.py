@@ -3,14 +3,20 @@
 from __future__ import annotations
 
 import io
+import threading
 import unittest
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 from openpyxl import load_workbook
 from streamlit.testing.v1 import AppTest
 
 import app as app_module
+import fetch_jobs
+import openalex_sdg
 from openalex_sdg import FetchStats
+
+APP_PATH = Path(__file__).resolve().parent / "app.py"
 
 
 def make_selection(**overrides):
@@ -97,7 +103,7 @@ class AppStateTests(unittest.TestCase):
         self.assertGreaterEqual(app_module.SPHERE_LONGITUDE_STEPS, 32)
 
     def test_network_edge_groups_rank_only_partner_connections(self) -> None:
-        primary, secondary = app_module._network_edge_groups(
+        primary, secondary = app_module._network_edge_groups_for_origins(
             {
                 ("Origin", "Partner A"): 10,
                 ("Origin", "Partner B"): 8,
@@ -106,7 +112,7 @@ class AppStateTests(unittest.TestCase):
                 ("Partner A", "Partner C"): 5,
                 ("Partner B", "Outside"): 20,
             },
-            "Origin",
+            {"Origin"},
             min_secondary_weight=2,
         )
 
@@ -202,6 +208,120 @@ class AppStateTests(unittest.TestCase):
         self.assertEqual(state["fetch_params"], params)
         self.assertTrue(state["fetch_in_progress"])
         self.assertFalse(state["fetch_cancel_requested"])
+
+    def test_background_fetch_receives_cancel_signal(self) -> None:
+        started = threading.Event()
+
+        def cancellable_fetch(job):
+            started.set()
+            job.publish_progress(1, 2, "Working")
+            while not job.cancel_event.is_set():
+                threading.Event().wait(0.01)
+            raise app_module.FetchCancelled()
+
+        job_id = app_module.start_fetch_job(cancellable_fetch)
+        self.assertTrue(started.wait(timeout=1))
+        state = {
+            "fetch_in_progress": True,
+            "fetch_cancel_requested": False,
+            app_module.FETCH_JOB_SESSION_KEY: job_id,
+        }
+        app_module.request_fetch_cancel(state)
+        job = app_module.get_fetch_job(job_id)
+        self.assertIsNotNone(job)
+        assert job is not None
+        assert job.thread is not None
+        job.thread.join(timeout=1)
+
+        snapshot = job.snapshot()
+        self.assertTrue(state["fetch_cancel_requested"])
+        self.assertTrue(snapshot.done)
+        self.assertIsInstance(snapshot.error, app_module.FetchCancelled)
+        self.assertEqual(snapshot.progress_message, "Working")
+        app_module.discard_fetch_job(job_id)
+
+    def test_job_registry_survives_main_script_rerun(self) -> None:
+        """Streamlit re-executes the main script in a fresh module namespace
+        on every rerun. A job registry defined in app.py would be reset to an
+        empty dict, orphaning a running fetch; the registry must therefore
+        live in an imported module (fetch_jobs) that stays cached."""
+        import sys
+        import types
+
+        import fetch_jobs
+
+        job_id = fetch_jobs.start_fetch_job(lambda job: {"status": "ok"})
+        try:
+            self.assertIsNotNone(fetch_jobs.get_fetch_job(job_id))
+            registry_before = fetch_jobs._FETCH_JOBS
+
+            # Mirror Streamlit's rerun: a fresh module object, registered in
+            # sys.modules, then the app source executed into it.
+            sim_module = types.ModuleType("app_rerun_sim")
+            sim_module.__file__ = str(APP_PATH)
+            sys.modules["app_rerun_sim"] = sim_module
+            try:
+                with open(APP_PATH, "r", encoding="utf-8") as handle:
+                    app_source = handle.read()
+                exec(compile(app_source, str(APP_PATH), "exec"), sim_module.__dict__)
+
+                # Sanity: the rerun simulation really re-executed app.py's
+                # top level in a fresh namespace (its module-level state is
+                # brand new while imported modules are shared).
+                self.assertIsNot(sim_module.SDG_COLORS, app_module.SDG_COLORS)
+                self.assertIs(fetch_jobs._FETCH_JOBS, registry_before)
+                self.assertIsNotNone(sim_module.get_fetch_job(job_id))
+            finally:
+                sys.modules.pop("app_rerun_sim", None)
+        finally:
+            fetch_jobs.discard_fetch_job(job_id)
+
+    def test_progress_reaches_completion_when_source_yields_less_than_limit(self) -> None:
+        self.assertEqual(
+            app_module.fetch_progress_fraction(3, 3, 10, "Completed"),
+            1.0,
+        )
+        self.assertEqual(
+            app_module.fetch_progress_fraction(1, None, 10, "Fetching"),
+            0.1,
+        )
+
+    def test_focus_candidates_are_bounded_and_search_all_rows(self) -> None:
+        rows = [
+            {"title": f"Publication {index}", "authors": "Example Author"}
+            for index in range(150)
+        ]
+        rows[120]["doi"] = "10.1234/special"
+
+        self.assertEqual(
+            app_module.focus_candidate_indices(
+                rows,
+                "",
+                page_start=25,
+                page_size=25,
+            ),
+            list(range(25, 50)),
+        )
+        self.assertEqual(
+            app_module.focus_candidate_indices(
+                rows,
+                "special",
+                page_start=0,
+                page_size=25,
+            ),
+            [120],
+        )
+        self.assertEqual(
+            len(
+                app_module.focus_candidate_indices(
+                    rows,
+                    "publication",
+                    page_start=0,
+                    page_size=25,
+                )
+            ),
+            100,
+        )
 
     def test_stale_result_invalidation_is_independent_of_streamlit(self) -> None:
         selection = make_selection()
@@ -413,6 +533,63 @@ class AppStateTests(unittest.TestCase):
         source_options = app.multiselect[0].options
         self.assertEqual(source_options[0], "OpenAlex")
         self.assertEqual(source_options[1:], sorted(source_options[1:], key=str.casefold))
+
+    def test_fetch_click_and_first_poll_survive_script_rerun(self) -> None:
+        """Regression: Streamlit re-executes app.py in a fresh module
+        namespace on every rerun. When the job registry lived in app.py, the
+        first poll after clicking Fetch lost the running job and rendered
+        'The background fetch state is unavailable.'"""
+        release = threading.Event()
+        stats = FetchStats(
+            total_expected=0,
+            total_processed=0,
+            openalex_abstract_missing=0,
+            ss_abstract_retrieved=0,
+            gs_abstract_retrieved=0,
+        )
+
+        def blocking_fetch(**kwargs):
+            release.wait(timeout=5)
+            return [], stats
+
+        with patch.object(
+            openalex_sdg,
+            "fetch_publications_with_sdg",
+            side_effect=blocking_fetch,
+        ):
+            app = AppTest.from_file("app.py")
+            app.session_state["selected_institution_id"] = (
+                "https://openalex.org/I123"
+            )
+            app.run(timeout=60)
+            app.multiselect[1].set_value(["Articles"])
+            app.run(timeout=60)
+            app.button(key="main_fetch_button").click()
+            app.run(timeout=60)
+
+            rendered = [
+                element.value
+                for element in [*app.text, *app.error, *app.info]
+            ]
+            self.assertEqual(list(app.exception), [])
+            self.assertFalse(
+                any("background fetch state is unavailable" in value for value in rendered)
+            )
+            self.assertTrue(app.session_state["fetch_in_progress"])
+            job_id = app.session_state["fetch_job_id"]
+            self.assertTrue(job_id)
+            job = fetch_jobs.get_fetch_job(job_id)
+            self.assertIsNotNone(job)
+
+            release.set()
+            assert job is not None
+            job.thread.join(timeout=5)
+            app.run(timeout=60)
+
+        self.assertEqual(list(app.exception), [])
+        self.assertFalse(app.session_state["fetch_in_progress"])
+        self.assertIn("fetch_result", app.session_state)
+        self.assertNotIn("fetch_job_id", app.session_state)
 
     def test_selecting_viadrina_oai_source_uses_configured_institution(self) -> None:
         app = AppTest.from_file("app.py").run(timeout=30)

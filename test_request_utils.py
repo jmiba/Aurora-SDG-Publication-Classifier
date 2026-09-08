@@ -21,6 +21,23 @@ def response(status_code: int, *, retry_after: str | None = None) -> requests.Re
 
 
 class RequestWithBackoffTests(unittest.TestCase):
+    def test_rate_limiter_sleeps_after_releasing_reservation_lock(self) -> None:
+        limiter = openalex_sdg._RateLimiter(0.5)
+        limiter._next_start = 10.25
+
+        def assert_lock_is_free(delay: float) -> None:
+            self.assertEqual(delay, 0.25)
+            self.assertTrue(limiter._lock.acquire(blocking=False))
+            limiter._lock.release()
+
+        with (
+            patch.object(openalex_sdg.time, "monotonic", return_value=10.0),
+            patch.object(openalex_sdg.time, "sleep", side_effect=assert_lock_is_free),
+        ):
+            limiter.wait()
+
+        self.assertEqual(limiter._next_start, 10.75)
+
     def test_backoff_is_exponential_with_full_jitter_and_cap(self) -> None:
         with patch("request_utils.random.uniform", side_effect=lambda low, high: high):
             self.assertEqual(_backoff(1, 0.5, 15.0, None), 0.5)
@@ -107,6 +124,41 @@ class RequestWithBackoffTests(unittest.TestCase):
         self.assertIsNone(prediction)
         self.assertEqual(note, "http_error:429")
         self.assertEqual(session.post.call_count, 2)
+
+    def test_aurora_non_json_success_reports_invalid_json(self) -> None:
+        session = Mock()
+        invalid_response = response(200)
+        invalid_response._content = b"not json"
+        invalid_response.encoding = "utf-8"
+        session.post.return_value = invalid_response
+
+        prediction, note = openalex_sdg.classify_text_aurora(
+            "aurora-sdg-multi",
+            "Classification input",
+            session=session,
+            aurora_base_url="https://aurora.example/classify",
+            retries=1,
+        )
+
+        self.assertIsNone(prediction)
+        self.assertEqual(note, "invalid json")
+
+    def test_semantic_scholar_quotes_doi_as_one_url_segment(self) -> None:
+        session = Mock()
+        success = response(200)
+        success._content = b'{"abstract": "Found"}'
+        success.encoding = "utf-8"
+        session.get.return_value = success
+
+        abstract = openalex_sdg.get_abstract_from_semantic_scholar(
+            "10.1234/example(2024)/part?query",
+            session=session,
+            retries=1,
+        )
+
+        self.assertEqual(abstract, "Found")
+        requested_url = session.get.call_args.args[0]
+        self.assertIn("10.1234%2Fexample%282024%29%2Fpart%3Fquery", requested_url)
 
     def test_semantic_scholar_reports_rejected_credentials(self) -> None:
         session = Mock()

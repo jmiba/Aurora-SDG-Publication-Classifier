@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from html import unescape
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
+from urllib.parse import quote
 
 import requests
 
@@ -26,6 +27,7 @@ from cache_db import (
 )
 from publication_sources import (
     DSpaceSource,
+    OaiPmhProtocolError,
     OaiPmhSource,
     SourceFetchCancelled,
     WorkTypeSelection,
@@ -128,11 +130,11 @@ class _RateLimiter:
             return
         with self._lock:
             now = time.monotonic()
-            delay = self._next_start - now
-            if delay > 0:
-                time.sleep(delay)
-                now = time.monotonic()
-            self._next_start = max(self._next_start, now) + self._min_interval
+            reserved_start = max(self._next_start, now)
+            self._next_start = reserved_start + self._min_interval
+        delay = reserved_start - now
+        if delay > 0:
+            time.sleep(delay)
 
 
 class _SemanticScholarRunState:
@@ -226,39 +228,6 @@ def fetch_institution_lineage(
         pass
     return []
 
-def flatten_authors_and_institutions(authorships: Sequence[dict]) -> Tuple[str, str, List[dict]]:
-    """
-    Convert OpenAlex authorship structures into 'A; B' strings and collect structured affiliations.
-    Each affiliation is a dict with id, name, and country.
-    """
-    if not authorships:
-        return "", "", []
-    author_names: List[str] = []
-    all_insts: List[str] = []
-    affiliations: List[dict] = []
-    for author_entry in authorships:
-        author = (author_entry.get("author") or {}).get("display_name") or ""
-        if author:
-            author_names.append(author)
-        for inst in author_entry.get("institutions") or []:
-            name = inst.get("display_name") or ""
-            if name:
-                all_insts.append(name)
-            affiliations.append(
-                {
-                    "id": inst.get("id") or "",
-                    "name": name,
-                    "country": (inst.get("country_code") or "").upper(),
-                }
-            )
-    seen = set()
-    inst_names: List[str] = []
-    for name in all_insts:
-        if name not in seen:
-            seen.add(name)
-            inst_names.append(name)
-    return "; ".join(author_names), "; ".join(inst_names), affiliations
-
 def clean_html_fragment(text: str) -> str:
     """Strip HTML tags/entities and normalize whitespace."""
     if not text:
@@ -334,19 +303,6 @@ def _serpapi_result_year(result: Mapping[str, Any]) -> str:
         if year:
             return year
     return ""
-
-def _normalize_author_token(name: str) -> str:
-    """Produce a stable author token (surname or first token if comma style)."""
-    if not name:
-        return ""
-    clean = unicodedata.normalize("NFKD", name)
-    clean = "".join(ch for ch in clean if not unicodedata.combining(ch))
-    has_comma = "," in clean
-    clean = re.sub(r"[^\w\s]", " ", clean).lower()
-    parts = clean.split()
-    if not parts:
-        return ""
-    return parts[0] if has_comma else parts[-1]
 
 def get_abstract_from_serpapi_google_scholar(
     title: str,
@@ -568,7 +524,10 @@ def classify_text_aurora(
             base=pause,
             _before_request=request_limiter.wait if request_limiter else None,
         )
-        data = resp.json()
+        try:
+            data = resp.json()
+        except ValueError:
+            return None, "invalid json"
         if not data:
             return None, "empty json"
         return data, ""
@@ -591,7 +550,7 @@ def get_abstract_from_semantic_scholar(
     if not doi:
         return None
     cleaned_doi = doi.replace("https://doi.org/", "")
-    url = SEMANTIC_SCHOLAR_API.format(doi=cleaned_doi)
+    url = SEMANTIC_SCHOLAR_API.format(doi=quote(cleaned_doi, safe=""))
     headers = {"Accept": "application/json"}
     if api_key:
         headers["x-api-key"] = api_key
@@ -1028,6 +987,9 @@ def fetch_publications_with_sdg(
                     if status_code not in RETRYABLE_STATUS_CODES:
                         raise
                     stats.source_failures.append(f"{oai_source.label} (HTTP {status_code})")
+                    continue
+                except OaiPmhProtocolError as exc:
+                    stats.source_failures.append(str(exc))
                     continue
                 source_records.extend(records)
         except SourceFetchCancelled as exc:

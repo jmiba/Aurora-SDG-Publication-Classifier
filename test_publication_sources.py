@@ -16,6 +16,7 @@ import cache_db
 import openalex_sdg
 from publication_sources import (
     DSpaceSource,
+    OaiPmhProtocolError,
     OaiPmhSource,
     _reconstruct_openalex_abstract,
     deduplicate_publications,
@@ -431,6 +432,48 @@ class PublicationSourceTests(unittest.TestCase):
         fetch_openalex.assert_not_called()
         fetch_oai.assert_called_once()
 
+    def test_oai_protocol_error_skips_only_the_failed_source(self) -> None:
+        sources = [
+            OaiPmhSource(
+                id="broken-oai",
+                label="Broken OAI",
+                base_url="https://broken.example/oai",
+            ),
+            OaiPmhSource(
+                id="working-oai",
+                label="Working OAI",
+                base_url="https://working.example/oai",
+            ),
+        ]
+        with patch.object(
+            openalex_sdg,
+            "fetch_oai_records",
+            side_effect=[
+                OaiPmhProtocolError(
+                    "Broken OAI returned OAI-PMH badResumptionToken: expired"
+                ),
+                ([], 0),
+            ],
+        ) as fetch_oai:
+            rows, stats = openalex_sdg.fetch_publications_with_sdg(
+                include_openalex=False,
+                dspace_sources=[],
+                oai_sources=sources,
+                institution_id=None,
+                from_date="2024-01-01",
+                to_date="2024-12-31",
+                work_type=None,
+                model="skip",
+                user_agent="test-agent",
+            )
+
+        self.assertEqual(rows, [])
+        self.assertEqual(fetch_oai.call_count, 2)
+        self.assertEqual(
+            stats.source_failures,
+            ["Broken OAI returned OAI-PMH badResumptionToken: expired"],
+        )
+
     def test_normalize_article_without_exposing_artwork_or_thumbnail_media(self) -> None:
         record = dspace_search_object(
             item_id="article-1",
@@ -780,6 +823,64 @@ class PublicationSourceTests(unittest.TestCase):
             [call["params"]["f.entityType"] for call in session.calls],
             ["Article,equals", "Book,equals", "Artistic,equals"],
         )
+
+    def test_dspace_limit_is_split_across_selected_entity_types(self) -> None:
+        payloads = []
+        for entity_type in ("Article", "Book"):
+            payloads.append(
+                {
+                    "_embedded": {
+                        "searchResult": {
+                            "page": {
+                                "number": 0,
+                                "size": 100,
+                                "totalPages": 1,
+                                "totalElements": 5,
+                            },
+                            "_embedded": {
+                                "objects": [
+                                    dspace_search_object(
+                                        item_id=f"{entity_type.lower()}-{index}",
+                                        entity_type=entity_type,
+                                        title=f"{entity_type} {index}",
+                                        metadata={
+                                            "dc.date.issued": metadata_entry("2024")
+                                        },
+                                    )
+                                    for index in range(5)
+                                ]
+                            },
+                        }
+                    }
+                }
+            )
+        session = FakeSession(payloads)
+
+        records, _ = fetch_dspace_records(
+            session,
+            DSpaceSource(
+                id="two-types",
+                label="Two Type Repository",
+                base_url="https://repo.example/server/api",
+                entity_types=("Article", "Book"),
+            ),
+            from_date="2023-01-01",
+            to_date="2026-08-31",
+            work_type=None,
+            user_agent="test-agent",
+            limit_rows=4,
+            page_size=100,
+        )
+
+        # With two entity types and limit_rows=4 each type is capped at
+        # ceil(4 / 2) = 2 records instead of the full limit, so the source
+        # no longer over-fetches by the number of entity types.
+        self.assertEqual(len(records), 4)
+        self.assertEqual(
+            [call["params"]["f.entityType"] for call in session.calls],
+            ["Article,equals", "Book,equals"],
+        )
+        self.assertEqual(len(session.calls), 2)
 
     def test_book_and_chapter_selection_uses_one_dspace_book_query(self) -> None:
         payload = {
@@ -1134,6 +1235,9 @@ class CacheMigrationTests(unittest.TestCase):
                 "UPDATE canonical_works SET oa_status = 'closed' WHERE publication_key = ?",
                 (publication["publication_key"],),
             )
+            conn.execute(
+                "DELETE FROM cache_meta WHERE key = 'oa_consistency_v1'"
+            )
             conn.commit()
         finally:
             conn.close()
@@ -1143,6 +1247,41 @@ class CacheMigrationTests(unittest.TestCase):
 
         self.assertEqual(repaired["is_oa"], 1)
         self.assertEqual(repaired["oa_status"], "open")
+
+    def test_oa_consistency_repair_runs_only_once_per_cache(self) -> None:
+        cache_db._get_conn()
+        cache_db.close_connection()
+
+        with patch.object(cache_db, "_repair_oa_consistency") as repair:
+            cache_db._get_conn()
+
+        repair.assert_not_called()
+
+    def test_first_connection_is_initialized_once_across_threads(self) -> None:
+        barrier = threading.Barrier(3)
+        connections = []
+        errors = []
+        real_connect = sqlite3.connect
+
+        def connect() -> None:
+            try:
+                barrier.wait()
+                connections.append(cache_db._get_conn())
+            except Exception as exc:  # pragma: no cover - asserted below
+                errors.append(exc)
+
+        with patch.object(cache_db.sqlite3, "connect", wraps=real_connect) as factory:
+            threads = [threading.Thread(target=connect) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            barrier.wait()
+            for thread in threads:
+                thread.join()
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len(connections), 2)
+        self.assertIs(connections[0], connections[1])
+        factory.assert_called_once()
 
     def test_narrower_run_preserves_provenance_and_richer_abstract(self) -> None:
         publication = {

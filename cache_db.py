@@ -12,7 +12,7 @@ from typing import Any, Dict, Mapping, Optional
 from publication_sources import publication_deduplication_key, reconcile_oa_pair
 
 DB_PATH = Path("cache.sqlite3")
-_LOCK = threading.Lock()
+_LOCK = threading.RLock()
 _CONN: Optional[sqlite3.Connection] = None
 
 
@@ -23,23 +23,30 @@ def _now() -> str:
 def _get_conn() -> sqlite3.Connection:
     """Return a global SQLite connection, initializing schema if needed."""
     global _CONN
-    if _CONN is None:
-        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _CONN = sqlite3.connect(DB_PATH, check_same_thread=False)
-        _CONN.row_factory = sqlite3.Row
-        _CONN.execute("PRAGMA journal_mode=WAL;")
-        _CONN.execute("PRAGMA synchronous=NORMAL;")
-        _CONN.execute("PRAGMA foreign_keys=ON;")
-        _init_schema(_CONN)
-    return _CONN
+    with _LOCK:
+        if _CONN is None:
+            DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+            try:
+                conn.row_factory = sqlite3.Row
+                conn.execute("PRAGMA journal_mode=WAL;")
+                conn.execute("PRAGMA synchronous=NORMAL;")
+                conn.execute("PRAGMA foreign_keys=ON;")
+                _init_schema(conn)
+            except Exception:
+                conn.close()
+                raise
+            _CONN = conn
+        return _CONN
 
 
 def close_connection() -> None:
     """Close the process-level connection, primarily for clean shutdown and tests."""
     global _CONN
-    if _CONN is not None:
-        _CONN.close()
-        _CONN = None
+    with _LOCK:
+        if _CONN is not None:
+            _CONN.close()
+            _CONN = None
 
 
 def _init_schema(conn: sqlite3.Connection) -> None:
@@ -174,7 +181,15 @@ def _init_schema(conn: sqlite3.Connection) -> None:
                 "INSERT INTO cache_meta(key, value) VALUES ('legacy_import_v2', ?)",
                 (_now(),),
             )
-        _repair_oa_consistency(conn)
+        oa_repair = conn.execute(
+            "SELECT value FROM cache_meta WHERE key = 'oa_consistency_v1'"
+        ).fetchone()
+        if not oa_repair:
+            _repair_oa_consistency(conn)
+            conn.execute(
+                "INSERT INTO cache_meta(key, value) VALUES ('oa_consistency_v1', ?)",
+                (_now(),),
+            )
 
 
 def _repair_oa_consistency(conn: sqlite3.Connection) -> None:
