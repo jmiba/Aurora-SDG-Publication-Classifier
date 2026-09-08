@@ -558,12 +558,17 @@ class AppStateTests(unittest.TestCase):
             side_effect=blocking_fetch,
         ):
             app = AppTest.from_file("app.py")
-            app.session_state["selected_institution_id"] = (
-                "https://openalex.org/I123"
+            app.run(timeout=60)
+            # Use a configuration that needs no secrets (no OpenAlex contact
+            # user agent, no Aurora URL) so the Fetch button is enabled in CI
+            # as well as locally.
+            app.multiselect[0].set_value(["dspace:swps-share"])
+            model_box = next(
+                box for box in app.selectbox if box.label == "Choose a model"
             )
+            model_box.set_value(4)
             app.run(timeout=60)
-            app.multiselect[1].set_value(["Articles"])
-            app.run(timeout=60)
+            self.assertEqual(list(app.exception), [])
             app.button(key="main_fetch_button").click()
             app.run(timeout=60)
 

@@ -11,6 +11,7 @@ python_version = "3.12"
 files = [
     "app.py",
     "cache_db.py",
+    "fetch_jobs.py",
     "openalex_sdg.py",
     "publication_sources.py",
     "request_utils.py",
