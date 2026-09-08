@@ -833,5 +833,96 @@ class AppStateTests(unittest.TestCase):
         )
 
 
+class OutputFilenameTests(unittest.TestCase):
+    def test_short_selections_keep_the_full_descriptive_name(self) -> None:
+        name = app_module.build_output_filename(
+            ["openalex"],
+            "https://openalex.org/I123",
+            ("article",),
+            "aurora-sdg-multi",
+            "2024-01-01",
+            "2024-12-31",
+            10,
+        )
+
+        self.assertEqual(
+            name,
+            "openalex_I123_article_aurora-sdg-multi_2024-01-01_to2024-12-31_n10.csv",
+        )
+
+    def test_missing_optional_segments_stay_omitted(self) -> None:
+        name = app_module.build_output_filename(
+            ["openalex"],
+            None,
+            (),
+            "skip",
+            "2024-01-01",
+            None,
+            None,
+        )
+
+        self.assertEqual(name, "openalex_all_all_no-sdg_2024-01-01.csv")
+
+    def test_long_source_and_type_lists_stay_within_the_length_cap(self) -> None:
+        name = app_module.build_output_filename(
+            [
+                "openalex",
+                "swps-share",
+                "mruni-cris",
+                "aegean-hellanicus",
+                "viadrina-opus",
+                "paris8-hal",
+                "nbu-eprints",
+            ],
+            "https://openalex.org/I36685595",
+            (
+                "article",
+                "book",
+                "book-chapter",
+                "proceedings-article",
+                "report",
+                "dissertation",
+                "dataset",
+                "review",
+                "preprint",
+                "other",
+            ),
+            "aurora-sdg-multi",
+            "2015-01-01",
+            "2026-09-08",
+            5000,
+        )
+
+        self.assertLessEqual(len(name), app_module.MAX_EXPORT_FILENAME_LENGTH)
+        self.assertTrue(name.endswith(".csv"))
+        # The trailing filter segments survive truncation.
+        self.assertIn(
+            "_aurora-sdg-multi_2015-01-01_to2026-09-08_n5000.csv", name
+        )
+        self.assertIn("I36685595", name)
+        # Dropped ids are noted instead of silently vanishing.
+        self.assertRegex(name, r"\+\d+")
+
+    def test_extreme_lists_do_not_exceed_the_cap(self) -> None:
+        name = app_module.build_output_filename(
+            [f"source-{index}" for index in range(40)],
+            "https://openalex.org/I42",
+            tuple(f"type-{index}" for index in range(40)),
+            "aurora-sdg-multi",
+            "2000-01-01",
+            "2026-12-31",
+            1,
+        )
+
+        self.assertLessEqual(len(name), app_module.MAX_EXPORT_FILENAME_LENGTH)
+        self.assertTrue(name.endswith(".csv"))
+        self.assertFalse(name.startswith("_"))
+        # The Excel twin is at most one character longer (.xlsx vs .csv).
+        self.assertLessEqual(
+            len(name.replace(".csv", ".xlsx")),
+            app_module.MAX_EXPORT_FILENAME_LENGTH + 1,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

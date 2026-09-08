@@ -7,6 +7,14 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Changed
+
+- Capped export filenames at `MAX_EXPORT_FILENAME_LENGTH` (150 chars) so they
+  can be opened in Excel despite OS path limits. Overlong source and
+  publication-type lists are truncated by dropping whole ids from the end
+  (noted with a `+N` suffix), while the institution, model, date, and limit
+  segments are preserved.
+
 ## [1.1.2] - 2026-08-24
 
 ### Fixed

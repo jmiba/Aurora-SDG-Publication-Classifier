@@ -105,6 +105,7 @@ RESULT_SESSION_KEY = "fetch_result"
 RESULT_SCHEMA_VERSION = 3
 APP_VERSION = "1.1.2"
 APP_REPOSITORY_URL = "https://github.com/jmiba/Aurora-SDG-Publication-Classifier"
+MAX_EXPORT_FILENAME_LENGTH = 150
 SDG_THRESHOLD_PERCENT = 3.0
 OA_STATUS_ORDER = ["diamond", "gold", "hybrid", "green", "bronze", "open", "closed", "unknown"]
 OA_STATUS_COLORS = {
@@ -1368,6 +1369,36 @@ def render_publication_type_chart(rows: List[Dict[str, Any]], start_date: str, e
     )
     st.altair_chart(chart, width="stretch")
 
+def _fit_hyphen_items(items: Sequence[str], budget: int) -> str:
+    """Join ``items`` with ``-`` so the result fits within ``budget`` chars.
+
+    Whole items are dropped from the end and the number of dropped items is
+    recorded as a ``+N`` suffix inside the budget. If not even a single item
+    fits, the first item is hard-cut to fit.
+    """
+    items = [str(item) for item in items if str(item).strip()]
+    if not items:
+        return ""
+    joined = "-".join(items)
+    if len(joined) <= budget:
+        return joined
+    kept = list(items)
+    while len(kept) > 1:
+        omitted = len(items) - len(kept)
+        candidate = f"{'-'.join(kept)}+{omitted}" if omitted else "-".join(kept)
+        if len(candidate) <= budget:
+            return candidate
+        kept.pop()
+    omitted = len(items) - 1
+    single = items[0]
+    marker = f"+{omitted}"
+    if len(single) + len(marker) <= budget:
+        return f"{single}{marker}"
+    if len(marker) >= budget:
+        return ""
+    return f"{single[: budget - len(marker)]}{marker}"
+
+
 def build_output_filename(
     source_ids: Sequence[str],
     institution_id: Optional[str],
@@ -1377,17 +1408,44 @@ def build_output_filename(
     to_date: Optional[str],
     limit_rows: Optional[int],
 ) -> str:
-    """Generate a descriptive filename that encodes filters and limits."""
-    source_part = "-".join(source_ids) or "publications"
-    inst_tail = institution_id.rstrip("/").split("/")[-1] if institution_id else "all"
-    type_part = "-".join(work_types or []) or "all"
+    """Generate a descriptive filename that encodes filters and limits.
+
+    The name stays within :data:`MAX_EXPORT_FILENAME_LENGTH` because longer
+    names can exceed OS path limits and fail to open in Excel. When
+    truncation is needed, whole source and publication-type ids are dropped
+    (noted with a ``+N`` suffix) so the institution, model, date, and limit
+    segments are preserved.
+    """
+    inst_tail = sanitize_filename(
+        institution_id.rstrip("/").split("/")[-1] if institution_id else "all"
+    )
     model_part = model if model != "skip" else "no-sdg"
-    fname = f"{source_part}_{inst_tail}_{type_part}_{model_part}_{from_date}"
+    date_part = from_date
     if to_date and to_date != from_date:
-        fname += f"_to{to_date}"
-    if limit_rows:
-        fname += f"_n{limit_rows}"
-    return sanitize_filename(f"{fname}.csv")
+        date_part += f"_to{to_date}"
+    limit_part = f"_n{limit_rows}" if limit_rows else ""
+    fixed = f"_{inst_tail}_{model_part}_{date_part}{limit_part}.csv"
+
+    # Name layout: {sources}_{inst_tail}_{types}_{model}_{dates}{limit}.csv
+    available = MAX_EXPORT_FILENAME_LENGTH - len(fixed) - 1
+    type_items = [
+        sanitize_filename(str(item))
+        for item in (work_types or [])
+        if sanitize_filename(str(item))
+    ]
+    types_reserve = min(len("-".join(type_items)), 30) or 3
+    source_items = [
+        sanitize_filename(str(item)) for item in source_ids if sanitize_filename(str(item))
+    ]
+    source_part = _fit_hyphen_items(source_items, available - types_reserve) or "publications"
+    type_part = _fit_hyphen_items(type_items, available - len(source_part)) or "all"
+
+    fname = f"{source_part}_{inst_tail}_{type_part}_{model_part}_{date_part}{limit_part}.csv"
+    if len(fname) > MAX_EXPORT_FILENAME_LENGTH:
+        # Last-resort safety net for oversized fixed segments.
+        stem, _, ext = fname.rpartition(".")
+        fname = f"{stem[: MAX_EXPORT_FILENAME_LENGTH - len(ext) - 1]}.{ext}"
+    return fname
 
 
 def rows_to_csv_bytes(rows: List[Dict[str, Any]]) -> bytes:
