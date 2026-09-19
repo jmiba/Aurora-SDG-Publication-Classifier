@@ -40,13 +40,10 @@ from publication_sources import (
 from request_utils import RETRYABLE_STATUS_CODES, request_with_backoff
 
 # ------------------ CONFIG ------------------
-BASE_WORKS = "https://api.openalex.org/works"
 BASE_INSTITUTIONS = "https://api.openalex.org/institutions"
 SEMANTIC_SCHOLAR_API = "https://api.semanticscholar.org/graph/v1/paper/DOI:{doi}?fields=abstract"
 SERPAPI_GS_API = "https://serpapi.com/search"
 
-
-PER_PAGE = 200  # OpenAlex max
 ENRICHMENT_MAX_WORKERS = 8
 AURORA_MIN_INTERVAL_SECONDS = 0.12
 DEFAULT_FROM_DATE = "2023-01-01"
@@ -434,17 +431,6 @@ def scholarly_fallback_available() -> bool:
         return importlib.util.find_spec("scholarly") is not None
     except (ImportError, AttributeError, ValueError):
         return False
-
-def abbreviate_authors(value: str) -> str:
-    """Return compact 'First Author et al.' preview for UI progress messages."""
-    if not value:
-        return ""
-    authors = [part.strip() for part in value.split(";") if part.strip()]
-    if not authors:
-        return ""
-    if len(authors) == 1:
-        return authors[0]
-    return f"{authors[0]} et al."
 
 def make_filter(
     institution_id: str,

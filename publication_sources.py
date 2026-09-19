@@ -898,6 +898,7 @@ def fetch_oai_records(
     page = 0
     complete_list_size: Optional[int] = None
     seen_tokens = set()
+    harvested_count = 0
 
     while True:
         _ensure_not_cancelled(cancel_check)
@@ -933,6 +934,7 @@ def fetch_oai_records(
             )
         for record_element in list_records.findall(f"{{{OAI_NAMESPACE}}}record"):
             _ensure_not_cancelled(cancel_check)
+            harvested_count += 1
             normalized = normalize_oai_record(record_element, source)
             if not normalized:
                 continue
@@ -964,7 +966,7 @@ def fetch_oai_records(
             reverse=True,
         )
         records = records[:limit_rows]
-    return records, complete_list_size if complete_list_size is not None else len(records)
+    return records, complete_list_size if complete_list_size is not None else harvested_count
 
 
 def fetch_hal_records(

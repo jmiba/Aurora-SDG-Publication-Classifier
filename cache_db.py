@@ -501,19 +501,6 @@ def _execute_upsert_publication(
     )
 
 
-def upsert_publication(row: Mapping[str, Any]) -> None:
-    """Create or enrich a canonical publication without reducing cached metadata."""
-    with _LOCK:
-        conn = _get_conn()
-        with conn:
-            publication_key = str(row.get("publication_key") or "").strip()
-            existing_row = conn.execute(
-                "SELECT * FROM canonical_works WHERE publication_key = ?", (publication_key,)
-            ).fetchone()
-            payload = _canonical_payload(row, dict(existing_row) if existing_row else None)
-            _execute_upsert_publication(conn, payload)
-
-
 def _source_record_payload(
     publication_key: str, source_record: Mapping[str, Any]
 ) -> Optional[Dict[str, Any]]:
@@ -601,23 +588,6 @@ def _sync_canonical_provenance(conn: sqlite3.Connection, publication_key: str) -
             publication_key,
         )
     )
-
-
-def upsert_source_record(publication_key: str, source_record: Mapping[str, Any]) -> None:
-    payload = _source_record_payload(publication_key, source_record)
-    if not payload:
-        return
-    with _LOCK:
-        conn = _get_conn()
-        with conn:
-            previous = conn.execute(
-                "SELECT publication_key FROM source_records WHERE source_record_key = ?",
-                (payload["source_record_key"],),
-            ).fetchone()
-            _execute_upsert_source_record(conn, payload)
-            _sync_canonical_provenance(conn, publication_key)
-            if previous and previous["publication_key"] != publication_key:
-                _sync_canonical_provenance(conn, previous["publication_key"])
 
 
 def upsert_work(row: Mapping[str, Any], raw_record: Optional[Mapping[str, Any]] = None) -> None:
@@ -726,8 +696,6 @@ __all__ = [
     "get_cached_publication",
     "get_cached_sdg_result",
     "get_cached_work",
-    "upsert_publication",
     "upsert_sdg_result",
-    "upsert_source_record",
     "upsert_work",
 ]
