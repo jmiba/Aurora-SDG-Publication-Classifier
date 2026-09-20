@@ -33,7 +33,11 @@ ENV/
 # --- Local data/cache ---
 cache.sqlite3*
 
+# --- Local investigation reports ---
+reports/
+
 # --- Misc ---
 *.swp
 *.swo
 *.bak
+.codex

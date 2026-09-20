@@ -670,25 +670,25 @@ def upsert_sdg_result(
     }
     with _LOCK:
         conn = _get_conn()
-        conn.execute(
-            """
-            INSERT INTO sdg_results_v2 (
-                publication_key, model, text_hash, sdg_response,
-                sdg_formatted, sdg_note, classified_at
-            ) VALUES (
-                :publication_key, :model, :text_hash, :sdg_response,
-                :sdg_formatted, :sdg_note, :classified_at
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO sdg_results_v2 (
+                    publication_key, model, text_hash, sdg_response,
+                    sdg_formatted, sdg_note, classified_at
+                ) VALUES (
+                    :publication_key, :model, :text_hash, :sdg_response,
+                    :sdg_formatted, :sdg_note, :classified_at
+                )
+                ON CONFLICT(publication_key, model) DO UPDATE SET
+                    text_hash=excluded.text_hash,
+                    sdg_response=excluded.sdg_response,
+                    sdg_formatted=excluded.sdg_formatted,
+                    sdg_note=excluded.sdg_note,
+                    classified_at=excluded.classified_at
+                """,
+                payload,
             )
-            ON CONFLICT(publication_key, model) DO UPDATE SET
-                text_hash=excluded.text_hash,
-                sdg_response=excluded.sdg_response,
-                sdg_formatted=excluded.sdg_formatted,
-                sdg_note=excluded.sdg_note,
-                classified_at=excluded.classified_at
-            """,
-            payload,
-        )
-        conn.commit()
 
 
 __all__ = [

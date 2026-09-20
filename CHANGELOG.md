@@ -5,6 +5,27 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.5] - 2026-09-20
+
+### Added
+
+- A `lat.md/` concept directory (managed by [lat.md](https://www.npmjs.com/package/lat.md)) anchoring the architecture, source adapters, enrichment pipeline, cache, fetch jobs, exports, and test map to the source code.
+
+### Changed
+
+- Refactored the optional `scholarly` Google Scholar fallback into a single-attempt helper plus a thin retry loop, removing a redundant in-loop failure return without changing retry behavior.
+- Persist SDG classifications through the same `with conn:` transaction pattern as the other cache upserts instead of an explicit commit.
+- Stop reading institution-search results from session state twice per rerun in the institution selector.
+- Drop a redundant byte copy when decoding the CSV fallback in completed-result payloads.
+
+### Fixed
+
+- Report the source's returned record count as the OAI-PMH total when the server omits `completeListSize`, instead of the locally filtered and limit-trimmed result count, matching the DSpace and HAL fetchers.
+
+### Removed
+
+- Dead code: the unused `BASE_WORKS` and `PER_PAGE` constants in `openalex_sdg.py`, the `openalex_sdg.abbreviate_authors` duplicate (the app uses its own copy), and the unused public cache functions `upsert_publication` and `upsert_source_record`.
+
 ## [1.1.4] - 2026-09-08
 
 ### Changed

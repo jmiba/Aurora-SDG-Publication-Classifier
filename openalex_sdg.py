@@ -361,6 +361,34 @@ def get_abstract_from_serpapi_google_scholar(
         logging.warning("Serpapi call failed for '%s': %s", title, exc)
     return None
 
+def _scholarly_search_once(title: str, query: str, target_title: str) -> Optional[str]:
+    """Run one scholarly search and return the first matching abstract, if any."""
+    from scholarly import scholarly  # optional dependency, imported lazily
+
+    results = scholarly.search_pubs(query)
+    for _ in range(5):  # look at a few candidates
+        try:
+            candidate = next(results)
+        except StopIteration:
+            break
+        cand_title = candidate.get("bib", {}).get("title") or candidate.get("name")
+        if not cand_title:
+            continue
+        norm_candidate = _normalize_text_for_match(cand_title)
+        if not (norm_candidate.startswith(target_title) or target_title.startswith(norm_candidate)):
+            continue
+        try:
+            filled = scholarly.fill(candidate)
+        except Exception as fill_exc:  # pragma: no cover - external call
+            logging.debug("scholarly.fill failed: %s", fill_exc)
+            continue
+        abstract = filled.get("abstract") or (filled.get("bib") or {}).get("abstract")
+        if abstract:
+            logging.info("scholarly abstract retrieved for '%s'", title)
+            return clean_html_fragment(abstract)
+    return None
+
+
 def get_abstract_from_scholarly(
     title: str,
     authors: str,
@@ -390,38 +418,16 @@ def get_abstract_from_scholarly(
         logging.warning("scholarly FreeProxies setup failed: %s", exc)
 
     target_title = _normalize_text_for_match(title)
-    for attempt in range(1, retries + 1):
+    for attempt in range(retries):
         try:
-            results = scholarly.search_pubs(query)
-            for _ in range(5):  # look at a few candidates
-                try:
-                    candidate = next(results)
-                except StopIteration:
-                    break
-                cand_title = candidate.get("bib", {}).get("title") or candidate.get("name")
-                if not cand_title:
-                    continue
-                norm_candidate = _normalize_text_for_match(cand_title)
-                if not (norm_candidate.startswith(target_title) or target_title.startswith(norm_candidate)):
-                    continue
-                try:
-                    filled = scholarly.fill(candidate)
-                except Exception as fill_exc:  # pragma: no cover - external call
-                    logging.debug("scholarly.fill failed: %s", fill_exc)
-                    continue
-                abstract = (
-                    filled.get("abstract")
-                    or (filled.get("bib") or {}).get("abstract")
-                )
-                if abstract:
-                    logging.info("scholarly abstract retrieved for '%s'", title)
-                    return clean_html_fragment(abstract)
-            return None
+            abstract = _scholarly_search_once(title, query, target_title)
         except Exception as exc:  # pragma: no cover - external call
-            logging.warning("scholarly search failed (attempt %s): %s", attempt, exc)
-            if attempt == retries:
-                return None
-            time.sleep(pause * attempt)
+            logging.warning("scholarly search failed (attempt %s): %s", attempt + 1, exc)
+        else:
+            if abstract:
+                return abstract
+        if attempt + 1 < retries:
+            time.sleep(pause * (attempt + 1))
     return None
 
 

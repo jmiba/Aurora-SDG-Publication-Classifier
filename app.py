@@ -104,7 +104,7 @@ CSV_FIELDNAMES = [
 ]
 RESULT_SESSION_KEY = "fetch_result"
 RESULT_SCHEMA_VERSION = 3
-APP_VERSION = "1.1.4"
+APP_VERSION = "1.1.5"
 APP_REPOSITORY_URL = "https://github.com/jmiba/Aurora-SDG-Publication-Classifier"
 MAX_EXPORT_FILENAME_LENGTH = 150
 SDG_THRESHOLD_PERCENT = 3.0
@@ -1525,15 +1525,15 @@ def render_institution_selector(user_agent: str) -> Tuple[Optional[str], bool]:
             type="primary",
             disabled=not has_contact_user_agent(user_agent),
         )
-    search_results: Optional[List[dict]] = st.session_state.get("institution_search_results")
-    search_ran = st.session_state.get("institution_search_ran", False)
     if submitted:
         if not search_query.strip():
             st.warning("Please provide a search query.")
         else:
             with st.spinner("Searching institutions…"):
                 try:
-                    search_results = search_institutions_by_name(search_query.strip(), user_agent=user_agent)
+                    search_results: Optional[List[dict]] = search_institutions_by_name(
+                        search_query.strip(), user_agent=user_agent
+                    )
                 except requests.HTTPError as exc:
                     st.error(f"Institution search failed: {exc}")
                     search_results = []
@@ -2042,9 +2042,9 @@ def result_rows_from_payload(result_payload: Mapping[str, Any]) -> List[Dict[str
         return [dict(row) for row in rows if isinstance(row, Mapping)]
     csv_bytes = result_payload.get("csv_bytes") or b""
     try:
-        csv_text = bytes(csv_bytes).decode("utf-8")
+        csv_text = csv_bytes.decode("utf-8")
     except UnicodeDecodeError:
-        csv_text = bytes(csv_bytes).decode("utf-8", errors="ignore")
+        csv_text = csv_bytes.decode("utf-8", errors="ignore")
     return list(csv.DictReader(io.StringIO(csv_text)))
 
 
