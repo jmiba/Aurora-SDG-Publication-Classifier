@@ -323,12 +323,104 @@ class PublicationSourceTests(unittest.TestCase):
         self.assertEqual(total, 3)
         self.assertEqual(
             session.calls[0]["params"],
-            {"verb": "ListRecords", "metadataPrefix": "oai_dc"},
+            {
+                "verb": "ListRecords",
+                "metadataPrefix": "oai_dc",
+                "from": "2024-01-01",
+            },
         )
         self.assertEqual(
             session.calls[1]["params"],
             {"verb": "ListRecords", "resumptionToken": "next-page"},
         )
+
+    def test_oai_harvest_sends_from_only_on_first_page(self) -> None:
+        source = OaiPmhSource(
+            id="example-oai",
+            label="Example OAI",
+            base_url="https://repo.example/oai",
+        )
+        article = oai_record_xml(
+            identifier="oai:example:article",
+            datestamp="2026-08-01",
+            metadata=oai_dc_xml(
+                "<dc:title>Current article</dc:title>"
+                "<dc:date>2024-05-10</dc:date>"
+                "<dc:type>article</dc:type>"
+            ),
+        )
+        session = FakeSession(
+            [
+                oai_response_xml([article], token="next-page", complete_list_size=2),
+                oai_response_xml([]),
+            ]
+        )
+
+        records, _ = fetch_oai_records(
+            session,
+            source,
+            from_date="2024-01-01",
+            to_date="2024-12-31",
+            work_type=None,
+            user_agent="test-agent",
+        )
+
+        self.assertEqual(len(records), 1)
+        # The server-side datestamp window prunes pages before the walk
+        # starts; resumption requests must not mix new verb parameters in.
+        self.assertEqual(
+            session.calls[0]["params"],
+            {
+                "verb": "ListRecords",
+                "metadataPrefix": "oai_dc",
+                "from": "2024-01-01",
+            },
+        )
+        self.assertNotIn("from", session.calls[1]["params"])
+        self.assertNotIn("until", session.calls[0]["params"])
+
+    def test_oai_harvest_send_from_false_omits_datestamp_window(self) -> None:
+        source = OaiPmhSource(
+            id="example-oai",
+            label="Example OAI",
+            base_url="https://repo.example/oai",
+            send_from=False,
+        )
+        session = FakeSession([oai_response_xml([])])
+
+        fetch_oai_records(
+            session,
+            source,
+            from_date="2024-01-01",
+            to_date="2024-12-31",
+            work_type=None,
+            user_agent="test-agent",
+        )
+
+        self.assertEqual(
+            session.calls[0]["params"],
+            {"verb": "ListRecords", "metadataPrefix": "oai_dc"},
+        )
+
+    def test_parse_oai_sources_send_from_default_and_opt_out(self) -> None:
+        sources = parse_oai_sources(
+            [
+                {
+                    "id": "default-oai",
+                    "label": "Default OAI",
+                    "base_url": "https://default.example/oai",
+                },
+                {
+                    "id": "opt-out-oai",
+                    "label": "Opt-out OAI",
+                    "base_url": "https://optout.example/oai",
+                    "send_from": False,
+                },
+            ]
+        )
+
+        self.assertTrue(sources[0].send_from)
+        self.assertFalse(sources[1].send_from)
 
     def test_hal_search_harvest_filters_publication_dates_and_paginates(self) -> None:
         source = OaiPmhSource(

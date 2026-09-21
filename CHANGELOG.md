@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.6] - 2026-09-21
+
+### Changed
+
+- Generalized the publication-period pruning from the HAL Search API source to
+  all generic OAI-PMH sources: the first `ListRecords` request now sends the
+  selected period start as the OAI-PMH `from` datestamp parameter, skipping
+  old, unchanged records server-side (e.g. AccedaCRIS harvest shrinks from
+  ~133k to ~37k records for a 2025+ window). Local publication-date filtering
+  stays authoritative; `until` is never sent, and sources can opt out with
+  `send_from = false` in `oai_sources.toml`.
+
 ## [1.1.5] - 2026-09-20
 
 ### Added
@@ -173,7 +185,10 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   tracked source tree.
 - Required a non-placeholder contact address before OpenAlex queries can run.
 
-[Unreleased]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/1.1.3...HEAD
+[Unreleased]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/1.1.6...HEAD
+[1.1.6]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/1.1.5...1.1.6
+[1.1.5]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/1.1.4...1.1.5
+[1.1.4]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/1.1.3...1.1.4
 [1.1.3]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/1.1.2...1.1.3
 [1.1.2]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/1.1.1...1.1.2
 [1.1.1]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/1.1.0...1.1.1

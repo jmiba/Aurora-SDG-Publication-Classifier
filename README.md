@@ -189,6 +189,10 @@ publication_types = ["article", "book", "book-chapter", "report", "dissertation"
 
 # Optional: restrict harvesting to one OAI-PMH set.
 # set = "open_access"
+
+# Optional: opt out of the OAI-PMH `from` datestamp window (enabled by
+# default; see the note below the field list).
+# send_from = false
 ```
 
 The repository homepage is `https://opus4.kobv.de/opus4-euv/`. Its currently advertised OAI-PMH base URL is `https://opus4.kobv.de/opus4-euv/oai`; the older `/cgi-bin/oai` route returns HTTP 404 and is therefore not used.
@@ -200,6 +204,7 @@ Configuration fields:
 - `metadata_prefix` selects the metadata format. The adapter currently normalizes unqualified Dublin Core, so use `oai_dc`.
 - `set` is optional and restricts harvesting to one server-provided OAI-PMH set.
 - `publication_types` declares the normalized types offered in the app. Common Dublin Core and OPUS document types are mapped to the app’s shared type vocabulary.
+- `send_from` (default `true`) lets the first harvest request carry the selected period start date as the OAI-PMH `from` parameter so the repository skips old, unchanged records server-side. Set `send_from = false` for a source whose endpoint mishandles the parameter. The parameter filters repository metadata datestamps (last update), not `dc:date`, so the adapter still filters normalized publication dates locally; no `until` parameter is sent, because a record updated within the window may legitimately predate it.
 
 The adapter follows every `resumptionToken`, recognizes OAI-PMH errors returned inside successful HTTP responses, skips persistent deletion tombstones, rejects DTD/entity declarations, and limits individual XML responses to 25 MiB. It extracts titles, creators, descriptions, publication dates, types, languages, rights, DOIs, and repository landing-page URLs without downloading linked files.
 
@@ -208,7 +213,7 @@ optional `search_api_url` field. It filters `publicationDate_tdate` directly and
 uses `rows`/`start` pagination, avoiding a full OAI-PMH harvest for short
 publication periods. Other OAI-PMH sources continue to use the generic adapter.
 
-OAI-PMH date parameters filter the repository metadata datestamp—not `dc:date`. To preserve the app’s publication-period semantics, the adapter does not pass the selected period as OAI-PMH `from`/`until`; it filters normalized publication dates locally instead. This is correct but can make very large OAI-PMH repositories slower than APIs that support publication-date filtering directly.
+For large OAI-PMH repositories, the generic adapter therefore sends the selected period start date as the OAI-PMH `from` parameter (see `send_from` above), which prunes the resumption walk before it starts while the local publication-date filter keeps the app’s period semantics. `until` is never sent: a record updated inside the selected window may legitimately have a publication date outside it. Sources that support publication-date filtering directly (HAL Search API) or that would misbehave with the parameter can opt out entirely.
 
 For an untracked local source, put the same `[[oai_sources]]` structure in `.streamlit/secrets.toml`. A local entry with the same `id` replaces the tracked entry; a new `id` adds another source. Only public, unauthenticated OAI-PMH endpoints are currently supported.
 

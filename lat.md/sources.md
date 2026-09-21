@@ -9,7 +9,7 @@ Each adapter returns a list of normalized records plus a total. All adapters sha
 Source entries come from the tracked TOML registries (`dspace_sources.toml`, `oai_sources.toml`) and optional secrets-based additions. Parsing validates identifiers and URL shapes so only well-formed public endpoints are used.
 
 - [[publication_sources.py#parse_dspace_sources]] — parses and validates `DSpaceSource` entries (id, label, base_url, scope, entity types, OpenAlex/ROR ids).
-- [[publication_sources.py#parse_oai_sources]] — parses and validates `OaiPmhSource` entries (id, label, base_url, metadata prefix, set, optional HAL `search_api_url`, publication types).
+- [[publication_sources.py#parse_oai_sources]] — parses and validates `OaiPmhSource` entries (id, label, base_url, metadata prefix, set, optional HAL `search_api_url`, publication types, `send_from` opt-out, default on).
 - [[publication_sources.py#DSpaceSource]] and [[publication_sources.py#OaiPmhSource]] — frozen config dataclasses; both expose an `openalex_query_id` property for the linked institution.
 
 ## Normalization to the shared contract
@@ -28,7 +28,7 @@ Each adapter paginates its native API, applies local type/date filtering where t
 
 - [[publication_sources.py#fetch_openalex_records]] — cursor-paginated OpenAlex works for a filter.
 - [[publication_sources.py#fetch_dspace_records]] — paginated DSpace REST search per entity type.
-- [[publication_sources.py#fetch_oai_records]] — OAI-PMH `ListRecords` with resumption-token paging and a local publication-date filter; XML is parsed safely via [[publication_sources.py#_request_xml]] (size cap and DOCTYPE/ENTITY guard).
+- [[publication_sources.py#fetch_oai_records]] — OAI-PMH `ListRecords` with resumption-token paging and a local publication-date filter; XML is parsed safely via [[publication_sources.py#_request_xml]] (size cap and DOCTYPE/ENTITY guard). The first page request sends the selected period start as the OAI-PMH `from` parameter to prune unchanged old records server-side (per-source `send_from` opt-out); `until` is never sent because datestamps, not `dc:date`, are filtered, so the local date filter remains authoritative.
 - [[publication_sources.py#fetch_hal_records]] — HAL Search API paging with Solr date-range filtering.
 
 ## Deduplication

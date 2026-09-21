@@ -97,6 +97,11 @@ class OaiPmhSource:
     publication_types: Tuple[str, ...] = DEFAULT_OAI_PUBLICATION_TYPES
     openalex_institution_id: Optional[str] = None
     ror_id: Optional[str] = None
+    # Send the OAI-PMH ``from`` datestamp parameter to skip unchanged old
+    # records server-side. Filters datestamps, not dc:date, so the local
+    # publication-date filter stays authoritative; opt out per source with
+    # ``send_from = false`` when the endpoint misbehaves with it.
+    send_from: bool = True
 
     @property
     def openalex_query_id(self) -> Optional[str]:
@@ -231,6 +236,7 @@ def parse_oai_sources(raw_sources: Any) -> List[OaiPmhSource]:
                     values.get("openalex_institution_id")
                 ),
                 ror_id=_valid_ror_id(values.get("ror_id")),
+                send_from=values.get("send_from", True) is not False,
             )
         )
         seen_ids.add(source_id)
@@ -913,6 +919,10 @@ def fetch_oai_records(
                 "verb": "ListRecords",
                 "metadataPrefix": source.metadata_prefix,
             }
+            if source.send_from:
+                # Prunes records whose datestamp (last repository update, not
+                # dc:date) predates the window, shrinking large harvests.
+                params["from"] = from_date
             if source.set_spec:
                 params["set"] = source.set_spec
 

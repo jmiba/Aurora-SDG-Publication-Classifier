@@ -15,7 +15,7 @@ Standard commands to run the whole suite or a single module locally.
 
 ## Coverage map
 
-- `test_publication_sources.py` — OAI-PMH harvest/resumption tokens and local date filtering, HAL paging, DSpace pagination, OpenAlex abstract reconstruction, DOI/title deduplication with provenance, OA reconciliation, and source parsing validation.
+- `test_publication_sources.py` — OAI-PMH harvest/resumption tokens and local date filtering (including the first-page-only `from` datestamp window and the `send_from` opt-out), HAL paging, DSpace pagination, OpenAlex abstract reconstruction, DOI/title deduplication with provenance, OA reconciliation, and source parsing validation.
 - `test_app.py` — preview pagination and focus search, fetch job start/cancel/poll flow, stale-result invalidation, and Google Scholar status rendering.
 - `test_request_utils.py` — `Retry-After` parsing (seconds and HTTP-date forms), capped exponential backoff with jitter, and retryable vs fatal status handling.
 - `test_dependency_profiles.py` — asserts the base profile excludes the optional scholarly stack and that importing [[openalex_sdg.py]] never imports `scholarly` eagerly (the fallback is lazy by design).
