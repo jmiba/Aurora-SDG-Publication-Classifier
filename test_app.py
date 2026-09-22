@@ -566,7 +566,15 @@ class AppStateTests(unittest.TestCase):
             model_box = next(
                 box for box in app.selectbox if box.label == "Choose a model"
             )
-            model_box.set_value(4)
+            # Index of the "skip" entry in AURORA_MODELS: keeps the run free
+            # of Aurora secret requirements in CI.
+            model_box.set_value(
+                next(
+                    i
+                    for i, (name, _) in enumerate(app_module.AURORA_MODELS)
+                    if name == "skip"
+                )
+            )
             app.run(timeout=60)
             self.assertEqual(list(app.exception), [])
             app.button(key="main_fetch_button").click()

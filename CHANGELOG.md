@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.7] - 2026-09-22
+
+### Removed
+
+- The `aurora-sdg` (single-label mBERT) and `osdg` classifier models, because
+  the public Aurora service now returns HTTP 500 for both endpoints and no
+  longer advertises them. The two working multi-label mBERT models
+  (`aurora-sdg-multi`, `elsevier-sdg-multi`) remain the default options.
+
 ## [1.1.6] - 2026-09-21
 
 ### Changed
@@ -185,7 +194,8 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   tracked source tree.
 - Required a non-placeholder contact address before OpenAlex queries can run.
 
-[Unreleased]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/1.1.6...HEAD
+[Unreleased]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/1.1.7...HEAD
+[1.1.7]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/1.1.6...1.1.7
 [1.1.6]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/1.1.5...1.1.6
 [1.1.5]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/1.1.4...1.1.5
 [1.1.4]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/1.1.3...1.1.4

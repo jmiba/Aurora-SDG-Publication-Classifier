@@ -32,11 +32,11 @@ Abstracts are retrieved in a fixed fallback order: cached, then Semantic Scholar
 
 ## Classification
 
-Aurora SDG classification is rate-limited and cached by a hash of the classified text.
+Aurora SDG classification is rate-limited and cached by a hash of the classified text. A planned LLM-based classifier that reuses these same seams is described in [[llm-classifier]].
 
 - [[openalex_sdg.py#classify_text_aurora]] — POSTs the text to the Aurora endpoint for a model, returning `(json, note)`.
 - [[openalex_sdg.py#_RateLimiter]] — spaces request starts across workers without serializing response waits; the shared Aurora limiter uses `AURORA_MIN_INTERVAL_SECONDS`.
 - [[openalex_sdg.py#format_sdg_predictions]] — renders the Aurora `predictions` envelope into ordered `NN% SDG N (Name)` lines.
 - [[openalex_sdg.py#_hash_classification_text]] — SHA-256 of the classified text, stored as `text_hash` to decide cache reuse.
-- [[openalex_sdg.py#too_short_for_model]] — skips models that require a minimum word count (e.g. `osdg`).
+- [[openalex_sdg.py#too_short_for_model]] — skips models that require a minimum word count, configured via `MIN_WORDS_BY_MODEL` (currently empty: the word-count-requiring OSDG model was removed from the public Aurora service).
 - [[openalex_sdg.py#FetchStats]] — per-run counters for abstracts, SDG reuse, source failures, and the Semantic Scholar auth status.

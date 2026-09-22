@@ -67,14 +67,12 @@ OPENALEX_WORK_TYPES = (
 )
 
 AURORA_MODELS = [
-    ("aurora-sdg", "Aurora SDG mBERT (single-label, slower)"),
     ("aurora-sdg-multi", "Aurora SDG multi-label mBERT (fast)"),
     ("elsevier-sdg-multi", "Elsevier SDG multi-label mBERT (fast)"),
-    ("osdg", "OSDG model (multi-label, 15 languages)"),
     ("skip", "Skip SDG classification (no Aurora API calls)"),
 ]
 
-MIN_WORDS_BY_MODEL = {"osdg": 50}
+MIN_WORDS_BY_MODEL: Dict[str, int] = {}
 HTML_TAG_RE = re.compile(r"<[^>]+>")
 # --------------------------------------------
 
