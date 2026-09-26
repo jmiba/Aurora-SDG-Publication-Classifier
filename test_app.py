@@ -564,7 +564,7 @@ class AppStateTests(unittest.TestCase):
             # as well as locally.
             app.multiselect[0].set_value(["dspace:swps-share"])
             model_box = next(
-                box for box in app.selectbox if box.label == "Choose a model"
+        box for box in app.selectbox if box.label == "Choose SDG processing"
             )
             # Index of the "skip" entry in AURORA_MODELS: keeps the run free
             # of Aurora secret requirements in CI.

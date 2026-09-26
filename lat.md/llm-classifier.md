@@ -1,81 +1,62 @@
-# LLM-based SDG classifier (planned)
+# Independent LLM SDG classifier
 
-Design for an optional LLM-based SDG classifier that plugs into the existing enrichment pipeline as just another model option. Proposed, not yet implemented.
+Publication SDG classifier that reads title and abstract directly and makes its own zero, one, or multiple SDG decisions. It does not use Aurora predictions or scores.
 
-The public Aurora service retired the single-label mBERT (`aurora-sdg`) and `osdg` endpoints (both now return HTTP 500), leaving only the two multi-label mBERT backends. An LLM classifier restores model diversity and removes the dependency on the hosted VU service.
+This is a separate classification method, not an Aurora quality-control pass. The September 2026 Aurora QC prompt and workbook are useful for failure modes and review examples, but their machine-generated decisions are not verified reference labels.
 
-## Goals and non-goals
+## Goals and boundaries
 
-Ship a first-class "model" the user can pick in the same model selector, producing the same `predictions`-style result the rest of the pipeline already consumes.
+Give users a selectable, open-weights LLM comparison alongside the primary Aurora classification.
 
-- Goal: multi-label SDG classification with per-goal confidence, plus an optional single-label (primary SDG) mode, driven by a configurable LLM provider.
-- Goal: zero changes to downstream consumers — results flow through the same normalization as [[enrichment#Classification]] and the same SQLite cache.
-- Non-goal: replacing the working mBERT models; the LLM model is additive.
-- Non-goal: fine-tuning or training our own classifier in this phase.
+- Classify each canonical publication from its title and available abstract, without using Aurora or `x_sdgs` results as LLM input or decision evidence.
+- Permit an empty SDG set when the supplied text does not support a substantive SDG dimension.
+- Preserve the validated decision, evidence excerpts, and model and prompt identity separately from Aurora results so comparisons remain possible.
+- Keep primary `sdg_*` fields based on positive OpenAlex Aurora tags, the empty-list Aurora recheck, or the missing-field fallback; export LLM decisions only in `llm_*` columns.
+- Do not use the QC workbook as ground truth or fine-tune a model in the first implementation.
 
-## Integration points
+## Model selection
 
-The classifier call is already isolated, so the LLM model reuses the existing seams.
+Use a hosted inference endpoint for an open-weights model. Choose the production model by task-specific evaluation, not parameter count or general benchmark position.
 
-- [[openalex_sdg.py#classify_text_aurora]] is the single call site for hosted models; an LLM model branches before it (same `model` string from [[openalex_sdg.py#AURORA_MODELS]]).
-- [[openalex_sdg.py#format_sdg_predictions]] consumes the Aurora `predictions` envelope; the LLM path should emit that same envelope shape so the UI and exports stay untouched.
-- [[openalex_sdg.py#_hash_classification_text]] already keys the [[cache#SDG results]] cache by model + text hash, so LLM results cache independently of mBERT results.
-- [[openalex_sdg.py#_RateLimiter]] and `AURORA_MIN_INTERVAL_SECONDS` currently space Aurora calls; an LLM provider needs its own limiter tuned to its rate limits (LLM latency is far higher than mBERT's, so the shared 0.12 s floor is not appropriate).
-- The model selector is [[app.py#render_model_selector]] and the selection carries the model id in [[app.py#QuerySelection]]; adding an entry to `AURORA_MODELS` is the only app-side change.
+- Initial configured model: `Qwen/Qwen3.8-27B`, subject to availability of the exact checkpoint at a provider with structured output, suitable data handling, and acceptable cost and latency.
+- Challenger: `Qwen/Qwen3.5-397B-A17B`, a larger mixture-of-experts model with 397B total and 17B active parameters. Compare it on the same reviewed publications before paying for it on every row.
+- Pin the provider, endpoint model identifier, checkpoint or revision where exposed, inference parameters, and prompt version for each run. A provider alias alone is insufficient for reproducibility.
+- Keep the provider behind a small HTTP adapter so the classification rules and result schema do not depend on one host.
 
-## Model and prompt design
+## Evidence and decision contract
 
-One classification call per canonical publication, temperature 0, with a strict system prompt.
+The classifier assesses the 17 SDGs from publication text, without a pre-ranked candidate list.
 
-- System prompt: the classifier's role, the 17 SDGs with their UN names (code 1–17), the output contract, and the rule that only goals clearly supported by the text may be returned.
-- User prompt: the publication title, then the enriched abstract (the same `text_for_sdg` assembly used for the hosted models), and the instruction to emit JSON only.
-- Single-label mode: instruct the model to return exactly the one most-supported SDG (restoring the retired `aurora-sdg` behavior); multi-label mode returns every applicable SDG.
-- Pin the model identifier (provider + version) in configuration so results are reproducible across runs; a model upgrade is a configuration change, not a code change.
+- Input is the title and abstract after the existing source and enrichment steps; mark explicitly when only a title is available.
+- For every assigned SDG, require a brief, exact excerpt from the supplied title or abstract. Do not infer content from authors, venue, affiliation, publication type, or an Aurora score.
+- Accept zero, one, or multiple SDGs. Require each assigned SDG to have its own substantive content dimension; a general keyword, setting, method, or incidental mention is insufficient.
+- Review title-only decisions with extra care. Generic software releases, incidental locations, and passing mentions do not qualify. Ambiguous cases may be flagged for manual review.
+- Assess substantive findings about unequal opportunity, employment, civic participation, or renewable-energy policy even when the title is indirect. These are candidate dimensions, not automatic keyword matches.
+- Treat any model-generated confidence as an uncalibrated explanation aid, not an Aurora probability or a threshold for automatic acceptance. Omit confidence from the first decision schema unless calibrated on reviewed labels.
 
-## Response schema and validation
+## Output and validation
 
-Force structured output and normalize into the Aurora envelope before anything downstream sees it.
+Validate a structured response before it enters the cache or export path.
 
-- Require a JSON array of `{"sdg": <int 1–17>, "confidence": <float 0–1>}`; request JSON mode / function calling where the provider supports it.
-- Validate and repair: drop unknown codes, clamp scores to 0–1, drop duplicates (keep max score), reject empty results as a classification failure (matching how `invalid json` is noted today).
-- Map survivors into the documented `{"predictions": [{"sdg": {"code", "name"}, "prediction": score}]}` envelope so [[openalex_sdg.py#format_sdg_predictions]] renders them unchanged.
-- On a malformed or empty response, record a per-row note (e.g. `llm_invalid_json`) instead of failing the whole fetch, mirroring how hosted-model failures are currently reported.
+- Return an explicit status (`classified`, `no_sdg`, or `manual_review`), SDG codes in 1–17, and evidence for each assignment. `no_sdg` is a successful decision with an empty SDG list; malformed output and provider failure are separate errors. [[llm_sdg.py#validate_decision]] enforces the contract.
+- Reject duplicate or out-of-range codes, contradictory status and SDG combinations, unsupported evidence fields, and responses that do not satisfy the schema. Do not silently clamp invented scores into apparently valid results.
+- Store a hash of title, abstract, provider endpoint, model identifier, effective thinking mode, and prompt, plus the validated response. [[llm_sdg.py#LlmConfig#identity]] and [[llm_sdg.py#input_hash]] change cache identity when these change; hosted providers may not expose an exact checkpoint revision.
+- Adapt the shared UI and export boundary to display a valid empty decision and evidence. The current Aurora `predictions` envelope and `[[openalex_sdg.py#format_sdg_predictions]]` are presentation contracts for Aurora scores, not the independent classifier's truth model.
 
-## Provider abstraction
+## Integration
 
-Support at least two interchangeable backends behind one small interface.
+Reuse publication retrieval and abstract enrichment; run the LLM comparison only when selected.
 
-- API provider (e.g. an OpenAI-compatible chat-completions endpoint) configured by base URL, model id, and an API key from [[architecture#Secrets and configuration]].
-- Local provider (Ollama/vLLM-style HTTP endpoint) for zero per-call cost and full data privacy; same interface, key optional.
-- Keep the interface minimal — a `classify(title, abstract, model_id) -> envelope` call — so swapping providers is a secrets change, not a code change.
+- The selector at [[app.py#render_model_selector]] offers the optional independent LLM comparison. [[openalex_sdg.py#_enrich_and_classify_publication]] keeps Aurora primary and dispatches the LLM independently of its predictions; the Aurora fallback may run in the same fetch if OpenAlex tags are unavailable.
+- Keep provider credentials in the local secrets configuration documented through `.streamlit/secrets.sample.toml`. Never put keys, source text, or raw provider failures in routine logs.
+- The LLM method uses a two-worker limit, request spacing, timeout, and transient retries. It adapts request spacing to a provider's advertised minute limit and honors `ratelimit-reset` on HTTP 429. Qwen3.8 uses direct nonthinking answers by default to reduce latency; a secret can restore reasoning and changes the cache identity. Other models keep their provider default. A failed row remains distinguishable from `no_sdg` and does not stop other rows.
+- Keep Aurora and LLM cache entries separate and expose the LLM provider, model, prompt, and cache identity in its comparison columns. [[cache#SDG results]] stores LLM entries under a prompt/provider/model identity distinct from Aurora models.
 
-## Configuration
+## Qualification before rollout
 
-New optional secrets, documented in `.streamlit/secrets.sample.toml` alongside `aurora_base_url`.
+Use reviewed publication examples to test whether the model makes defensible, reproducible assignments.
 
-- `llm_classifier_enabled` (bool), `llm_provider_base_url`, `llm_provider_api_key`, `llm_provider_model`, and a label for the selector.
-- The LLM model(s) appear in `AURORA_MODELS` only when enabled, so existing deployments see no behavior change.
-
-## Caching, rate limiting, and cost
-
-LLM calls are more expensive and slower than mBERT calls; the plan must account for that before enabling the model.
-
-- Cache reuse is automatic via [[cache#SDG results]]; re-runs over the same corpus stay free.
-- Give the LLM path its own `_RateLimiter` (configurable minimum interval) and consider lowering `ENRICHMENT_MAX_WORKERS` for LLM runs, since per-call latency dominates.
-- Cost estimate: tokens scale with abstract length × number of classified publications; the 17-SDG system prompt is a fixed per-call overhead.
-
-## Risks and mitigations
-
-The main risks are nondeterminism, provider availability, and quality drift, each with a concrete mitigation.
-
-- Non-determinism: mitigated by temperature 0, pinned model version, and strict JSON validation.
-- Provider outage or rate limits: per-row notes instead of hard failures; the mBERT models remain available as fallback.
-- Quality drift between models: keep per-model cached results separate (already the case) so users can compare `aurora-sdg-multi` and the LLM model on the same publication set.
-
-## Acceptance criteria
-
-Definition of done before the LLM model is added to `AURORA_MODELS`.
-
-- Unit tests covering envelope normalization, code/score validation, malformed-response notes, and cache-key independence from the mBERT models.
-- `lat check` passes and the [[testing]] map covers the new normalization code.
-- A small manual comparison run (same publications, mBERT vs LLM) documenting agreement and notable differences.
+- Build a stratified, human-reviewed set across languages, disciplines, publication types, missing abstracts, no-SDG cases, and difficult overlaps such as SDG 10/16 and 13/15. Reviewers see source text, not model output, before labeling.
+- Measure per-SDG precision and recall, no-SDG false positives and false negatives, agreement between reviewers, structured-output failure rate, latency, and cost per publication. Review disagreements, including low-score Aurora cases, without treating Aurora or the QC workbook as the answer key.
+- Run the 27B candidate and the 397B challenger on the same set with a fixed prompt and comparable provider settings. Promote the larger model only if its improvement on the SDG task justifies its cost and latency.
+- Verify the selected provider's exact model identity, data retention and location terms, structured-output support, throughput, and failure behavior before sending a full corpus.

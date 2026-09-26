@@ -6,6 +6,7 @@ import hashlib
 import importlib.util
 import json
 import logging
+import math
 import re
 import threading
 import time
@@ -24,6 +25,15 @@ from cache_db import (
     get_cached_work,
     upsert_sdg_result,
     upsert_work,
+)
+from llm_sdg import (
+    PROMPT_VERSION,
+    LlmConfig,
+    classify_publication,
+    evidence_text,
+    format_decision,
+    input_hash,
+    validate_decision,
 )
 from publication_sources import (
     DSpaceSource,
@@ -46,6 +56,8 @@ SERPAPI_GS_API = "https://serpapi.com/search"
 
 ENRICHMENT_MAX_WORKERS = 8
 AURORA_MIN_INTERVAL_SECONDS = 0.12
+OPENALEX_SDG_THRESHOLD = 0.4
+AURORA_FALLBACK_CACHE_MODEL = "aurora-sdg-multi:openalex-0.4-v1"
 DEFAULT_FROM_DATE = "2023-01-01"
 DEFAULT_USER_AGENT = "Aurora-SDG-Publication-Classifier"
 OPENALEX_WORK_TYPES = (
@@ -67,8 +79,8 @@ OPENALEX_WORK_TYPES = (
 )
 
 AURORA_MODELS = [
-    ("aurora-sdg-multi", "Aurora SDG multi-label mBERT (fast)"),
-    ("elsevier-sdg-multi", "Elsevier SDG multi-label mBERT (fast)"),
+    ("aurora-sdg-multi", "OpenAlex Aurora SDGs; recheck empty or missing lists"),
+    ("llm-independent", "OpenAlex/Aurora SDGs + independent LLM comparison"),
     ("skip", "Skip SDG classification (no Aurora API calls)"),
 ]
 
@@ -131,6 +143,18 @@ class _RateLimiter:
         if delay > 0:
             time.sleep(delay)
 
+    def observe_minute_limit(self, response: requests.Response) -> None:
+        """Pace future requests from a provider's advertised minute quota."""
+        try:
+            limit = int(response.headers.get("x-ratelimit-limit-minute", ""))
+        except (TypeError, ValueError):
+            return
+        if limit <= 0:
+            return
+        with self._lock:
+            self._min_interval = max(self._min_interval, 60.0 / limit)
+            self._next_start = max(self._next_start, time.monotonic() + self._min_interval)
+
 
 class _SemanticScholarRunState:
     """Disable Semantic Scholar after credentials are rejected during one run."""
@@ -161,6 +185,7 @@ class _SemanticScholarRunState:
 
 _SCHOLARLY_LOCK = threading.Lock()
 _AURORA_RATE_LIMITER = _RateLimiter(AURORA_MIN_INTERVAL_SECONDS)
+_LLM_RATE_LIMITER = _RateLimiter(0.5)
 
 
 def too_short_for_model(model: str, text: str) -> bool:
@@ -616,6 +641,58 @@ def format_sdg_predictions(sdg_json: Optional[Any]) -> str:
     items.sort(key=lambda item: item[0], reverse=True)
     return "\n".join(fmt_line(score, code, name) for score, code, name in items)
 
+
+def select_aurora_predictions(value: Any) -> Optional[Dict[str, Any]]:
+    """Keep only valid Aurora scores meeting OpenAlex's 0.4 cutoff."""
+    if not isinstance(value, Mapping) or not isinstance(value.get("predictions"), list):
+        return None
+    selected = []
+    valid_count = 0
+    for item in value["predictions"]:
+        if not isinstance(item, Mapping) or not isinstance(item.get("sdg"), Mapping):
+            continue
+        sdg = item["sdg"]
+        try:
+            code = int(str(sdg.get("code") or ""))
+            score = float(str(item.get("prediction")))
+        except (TypeError, ValueError):
+            continue
+        if not 1 <= code <= 17 or not math.isfinite(score) or not 0 <= score <= 1:
+            continue
+        valid_count += 1
+        if score >= OPENALEX_SDG_THRESHOLD:
+            selected.append({
+                "prediction": score,
+                "sdg": {"code": str(code), "name": str(sdg.get("name") or f"SDG {code}")},
+            })
+    if value["predictions"] and not valid_count:
+        return None
+    return {"predictions": selected}
+
+
+def openalex_sdg_predictions(value: Any) -> Optional[Dict[str, Any]]:
+    """Convert an available OpenAlex SDG list, including [], to Aurora's envelope."""
+    if not isinstance(value, list):
+        return None
+    predictions = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            return None
+        match = re.search(r"(?:^|/)sdgs/(\d{1,2})$", str(item.get("id") or ""))
+        try:
+            score = float(str(item.get("score")))
+        except (TypeError, ValueError):
+            return None
+        if not match or not 1 <= int(match.group(1)) <= 17 or not math.isfinite(score) or not 0 <= score <= 1:
+            return None
+        if score >= OPENALEX_SDG_THRESHOLD:
+            code = int(match.group(1))
+            predictions.append({
+                "prediction": score,
+                "sdg": {"code": str(code), "name": str(item.get("display_name") or f"SDG {code}")},
+            })
+    return {"predictions": predictions}
+
 def sanitize_filename(value: str) -> str:
     """Strip unsafe characters so the filename can be used on most OSes."""
     value = unicodedata.normalize("NFKD", value)
@@ -686,6 +763,8 @@ def _enrich_and_classify_publication(
     cancel_event: threading.Event,
     semantic_scholar_state: Optional[_SemanticScholarRunState] = None,
     aurora_base_url: Optional[str] = None,
+    llm_config: Optional[LlmConfig] = None,
+    llm_limiter: Optional[_RateLimiter] = None,
 ) -> _PublicationEnrichment:
     """Enrich and classify one publication using the current worker's session."""
 
@@ -753,89 +832,163 @@ def _enrich_and_classify_publication(
 
     if abstract_text:
         result.total_abstracts_available = 1
-    abstract_updated = bool(abstract_text and abstract_text != cached_abstract)
     work_cache_changed = _work_cache_changed(publication, cached_work, abstract_text)
-    text_for_sdg = abstract_text or title
-    text_hash = _hash_classification_text(text_for_sdg)
-    sdg_json: Optional[Any] = None
+    sdg_json: Optional[Dict[str, Any]] = None
     sdg_note = ""
-    sdg_formatted = ""
-    cached_sdg_entry: Optional[Dict[str, Any]] = None
-    reused_sdg = False
+    sdg_source = ""
     work_written_for_classification = False
+    openalex_aurora = openalex_sdg_predictions(publication.get("_openalex_aurora_sdgs"))
+    openalex_x = openalex_sdg_predictions(publication.get("_openalex_x_sdgs"))
 
+    openalex_aurora_status = (
+        "classified" if openalex_aurora and openalex_aurora["predictions"]
+        else "empty" if openalex_aurora is not None else "unavailable"
+    )
     if model == "skip":
         sdg_note = "skipped: user selected 'skip'"
-    elif too_short_for_model(model, text_for_sdg):
-        sdg_note = f"skipped: {model} requires >={MIN_WORDS_BY_MODEL[model]} words"
+        sdg_source = "skipped"
+    elif openalex_aurora is not None and openalex_aurora["predictions"]:
+        sdg_json = openalex_aurora
+        sdg_source = "openalex_aurora"
     else:
-        cached_sdg_entry = get_cached_sdg_result(publication_key, model)
-        cached_hash = str((cached_sdg_entry or {}).get("text_hash") or "")
-        cached_response = str((cached_sdg_entry or {}).get("sdg_response") or "")
-        should_reuse = bool(cached_response.strip()) and (
-            cached_hash == text_hash or (not cached_hash and not abstract_updated)
+        # OpenAlex's empty list does not expose whether classification is
+        # complete or why no score was retained. Recheck it with enriched text.
+        sdg_source = (
+            "aurora_recheck_openalex_empty" if openalex_aurora is not None
+            else "aurora_fallback"
         )
-        if should_reuse and cached_sdg_entry is not None:
-            reused_sdg = True
-            raw_json = cached_response
-            if raw_json:
-                try:
-                    sdg_json = json.loads(raw_json)
-                except json.JSONDecodeError:
-                    sdg_json = None
-            sdg_formatted = cached_sdg_entry.get("sdg_formatted") or ""
-            sdg_note = cached_sdg_entry.get("sdg_note") or ""
-            if not sdg_formatted and sdg_json:
-                sdg_formatted = format_sdg_predictions(sdg_json)
-            if sdg_json is not None and not abstract_text:
-                sdg_note = _append_sdg_note(
-                    sdg_note,
-                    "low_confidence:title_only_no_abstract",
-                )
+        # OpenAlex classifies the title and abstract together, not the abstract alone.
+        text_for_sdg = "\n".join(part for part in (title, abstract_text) if part)
+        if not text_for_sdg:
+            sdg_note = "no text"
         else:
-            ensure_worker_active()
-            sdg_json, sdg_note = classify_text_aurora(
-                model,
-                text_for_sdg,
-                session,
-                aurora_base_url=aurora_base_url,
-                user_agent=user_agent,
-                request_limiter=aurora_limiter,
-            )
-            sdg_formatted = format_sdg_predictions(sdg_json) if sdg_json else ""
-            if sdg_json is not None and not abstract_text:
-                sdg_note = _append_sdg_note(
-                    sdg_note,
-                    "low_confidence:title_only_no_abstract",
+            text_hash = _hash_classification_text(text_for_sdg)
+            cached_sdg = get_cached_sdg_result(publication_key, AURORA_FALLBACK_CACHE_MODEL)
+            if cached_sdg and cached_sdg.get("text_hash") == text_hash:
+                try:
+                    sdg_json = select_aurora_predictions(json.loads(cached_sdg["sdg_response"]))
+                except (TypeError, ValueError, KeyError):
+                    pass
+            if sdg_json is None:
+                ensure_worker_active()
+                response, sdg_note = classify_text_aurora(
+                    "aurora-sdg-multi",
+                    text_for_sdg,
+                    session,
+                    aurora_base_url=aurora_base_url,
+                    user_agent=user_agent,
+                    request_limiter=aurora_limiter,
                 )
-            # The canonical work must exist before its FK-bound SDG result.
-            publication["abstract"] = abstract_text
-            upsert_work(publication)
-            work_written_for_classification = True
-            if sdg_json is not None:
-                upsert_sdg_result(
-                    publication_key=publication_key,
-                    model=model,
-                    sdg_response=sdg_json,
-                    sdg_formatted=sdg_formatted,
-                    sdg_note=sdg_note,
-                    text_hash=text_hash,
+                sdg_json = select_aurora_predictions(response) if response is not None else None
+                if response is not None and sdg_json is None:
+                    sdg_note = "invalid_aurora_response"
+                if sdg_json is not None:
+                    if not abstract_text:
+                        sdg_note = _append_sdg_note(sdg_note, "low_confidence:title_only_no_abstract")
+                    # The canonical work must exist before its FK-bound SDG result.
+                    publication["abstract"] = abstract_text
+                    upsert_work(publication)
+                    work_written_for_classification = True
+                    upsert_sdg_result(
+                        publication_key=publication_key,
+                        model=AURORA_FALLBACK_CACHE_MODEL,
+                        sdg_response=sdg_json,
+                        sdg_formatted=format_sdg_predictions(sdg_json),
+                        sdg_note=sdg_note,
+                        text_hash=text_hash,
+                    )
+
+    sdg_formatted = format_sdg_predictions(sdg_json)
+    sdg_status = (
+        "classified" if sdg_json and sdg_json["predictions"]
+        else "no_sdg" if sdg_json is not None
+        else "skipped" if model == "skip" else "failed"
+    )
+    if sdg_json is not None and not abstract_text:
+        sdg_note = _append_sdg_note(sdg_note, "low_confidence:title_only_no_abstract")
+
+    llm_decision: Optional[Dict[str, Any]] = None
+    llm_note = ""
+    llm_status = "not_run"
+    if model == "llm-independent":
+        llm_status = "failed"
+        if llm_config is None:
+            llm_note = "llm_configuration_error"
+        else:
+            llm_hash = input_hash(title, abstract_text, llm_config)
+            cached_llm = get_cached_sdg_result(publication_key, llm_config.cache_model)
+            if cached_llm and cached_llm.get("text_hash") == llm_hash:
+                try:
+                    llm_decision = validate_decision(
+                        json.loads(cached_llm["sdg_response"]), title, abstract_text,
+                    )
+                    llm_note = str(cached_llm.get("sdg_note") or "")
+                except (TypeError, ValueError, KeyError):
+                    pass
+            if llm_decision is None:
+                ensure_worker_active()
+                llm_decision, llm_note = classify_publication(
+                    title, abstract_text, session, llm_config,
+                    request_limiter=llm_limiter or _LLM_RATE_LIMITER,
                 )
+                if llm_decision is not None:
+                    if not work_written_for_classification:
+                        publication["abstract"] = abstract_text
+                        upsert_work(publication)
+                        work_written_for_classification = True
+                    upsert_sdg_result(
+                        publication_key=publication_key,
+                        model=llm_config.cache_model,
+                        sdg_response=llm_decision,
+                        sdg_formatted=format_decision(llm_decision),
+                        sdg_note=llm_note,
+                        text_hash=llm_hash,
+                    )
+            if llm_decision is not None:
+                llm_status = str(llm_decision["status"])
+                if not abstract_text:
+                    llm_note = _append_sdg_note(llm_note, "low_confidence:title_only_no_abstract")
 
     sdg_raw = json.dumps(sdg_json, ensure_ascii=False) if sdg_json is not None else ""
-    if reused_sdg and not sdg_raw and cached_sdg_entry:
-        sdg_raw = cached_sdg_entry.get("sdg_response") or ""
-
+    llm_raw = json.dumps(llm_decision, ensure_ascii=False) if llm_decision is not None else ""
+    x_status = (
+        "classified" if openalex_x and openalex_x["predictions"]
+        else "no_sdg" if openalex_x is not None else "unavailable"
+    )
     row_data = {
         key: value for key, value in publication.items() if not str(key).startswith("_")
     }
     row_data.update(
         {
             "abstract": abstract_text,
-            "sdg_model": model,
+            "sdg_model": "aurora-sdg-multi" if model != "skip" else "skip",
+            "sdg_source": sdg_source,
             "sdg_response": sdg_raw,
             "sdg_formatted": sdg_formatted,
             "sdg_note": sdg_note,
+            "sdg_status": sdg_status,
+            "sdg_evidence": "",
+            "sdg_classifier_version": (
+                "openalex:sustainable_development_goals" if sdg_source == "openalex_aurora"
+                else AURORA_FALLBACK_CACHE_MODEL if sdg_source in {
+                    "aurora_fallback", "aurora_recheck_openalex_empty"
+                } else ""
+            ),
+            "openalex_aurora_response": (
+                json.dumps(publication["_openalex_aurora_sdgs"], ensure_ascii=False)
+                if openalex_aurora is not None else ""
+            ),
+            "openalex_aurora_status": openalex_aurora_status,
+            "openalex_x_sdgs": format_sdg_predictions(openalex_x),
+            "openalex_x_sdgs_status": x_status,
+            "llm_response": llm_raw,
+            "llm_sdgs": format_decision(llm_decision) if llm_decision is not None else "",
+            "llm_status": llm_status,
+            "llm_note": llm_note,
+            "llm_evidence": evidence_text(llm_decision) if llm_decision is not None else "",
+            "llm_classifier_version": llm_config.cache_model if model == "llm-independent" and llm_config else "",
+            "llm_provider_model": llm_config.model if model == "llm-independent" and llm_config else "",
+            "llm_prompt_version": PROMPT_VERSION if model == "llm-independent" else "",
         }
     )
     publication_for_cache = dict(row_data)
@@ -862,6 +1015,7 @@ def fetch_publications_with_sdg(
     enable_google_scholar: bool = True,
     serpapi_api_key: Optional[str] = None,
     aurora_base_url: Optional[str] = None,
+    llm_config: Optional[LlmConfig] = None,
     extra_institution_ids: Optional[Sequence[str]] = None,
     progress_callback: ProgressHook = None,
     cancel_check: Optional[Callable[[], bool]] = None,
@@ -998,6 +1152,7 @@ def fetch_publications_with_sdg(
         if publications:
             cancel_event = threading.Event()
             aurora_limiter = _AURORA_RATE_LIMITER
+            llm_limiter = _RateLimiter(0.5)
             semantic_scholar_state = _SemanticScholarRunState()
             worker_local = threading.local()
             worker_sessions: List[requests.Session] = []
@@ -1013,7 +1168,7 @@ def fetch_publications_with_sdg(
                 return worker_session_value
 
             executor = ThreadPoolExecutor(
-                max_workers=min(ENRICHMENT_MAX_WORKERS, len(publications)),
+                max_workers=min(2 if model == "llm-independent" else ENRICHMENT_MAX_WORKERS, len(publications)),
                 thread_name_prefix="publication-enrichment",
             )
             pending = set()
@@ -1034,6 +1189,8 @@ def fetch_publications_with_sdg(
                         aurora_limiter=aurora_limiter,
                         cancel_event=cancel_event,
                         aurora_base_url=aurora_base_url,
+                        llm_config=llm_config,
+                        llm_limiter=llm_limiter,
                     )
                     future_to_index[future] = index
                 pending = set(future_to_index)

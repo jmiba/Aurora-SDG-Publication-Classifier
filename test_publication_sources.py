@@ -24,6 +24,7 @@ from publication_sources import (
     fetch_dspace_records,
     fetch_hal_records,
     fetch_oai_records,
+    fetch_openalex_records,
     normalize_dspace_object,
     normalize_oai_record,
     normalize_openalex_work,
@@ -141,6 +142,15 @@ class PublicationSourceTests(unittest.TestCase):
             label="Example Repository",
             base_url="https://repo.example/server/api",
         )
+
+    def test_openalex_fetch_requests_both_sdg_fields(self) -> None:
+        session = FakeSession([{"meta": {"count": 0}, "results": []}])
+        fetch_openalex_records(
+            session, filter_value="institutions.id:I1", work_type="article", user_agent="test",
+        )
+        selected = session.calls[0]["params"]["select"].split(",")
+        self.assertIn("sustainable_development_goals", selected)
+        self.assertIn("x_sdgs", selected)
 
     def test_parse_multiple_generic_dspace_sources(self) -> None:
         sources = parse_dspace_sources(
@@ -1203,6 +1213,129 @@ class CacheMigrationTests(unittest.TestCase):
         self.assertEqual(synchronous, 1)
         self.assertEqual(str(journal_mode).lower(), "wal")
 
+    def test_empty_openalex_aurora_list_survives_merge_and_is_rechecked(self) -> None:
+        repository = {
+            "publication_key": "repo:1", "source": "repo", "source_record_key": "repo:1",
+            "source_record_id": "1", "doi": "https://doi.org/10.1234/shared-sdg",
+            "title": "Shared work", "abstract": "Repository abstract",
+        }
+        openalex = normalize_openalex_work({
+            "id": "https://openalex.org/W-SDG", "title": "Shared work",
+            "doi": "10.1234/shared-sdg", "authorships": [],
+            "sustainable_development_goals": [],
+            "x_sdgs": [{"id": "https://openalex.org/sdgs/7", "display_name": "Clean energy", "score": 0.6}],
+        })
+        merged = deduplicate_publications([repository, openalex])[0]
+        self.assertEqual(merged["_openalex_aurora_sdgs"], [])
+        response = {"predictions": [
+            {"prediction": 0.39, "sdg": {"code": "8", "name": "Decent work"}},
+            {"prediction": 0.4, "sdg": {"code": "7", "name": "Clean energy"}},
+        ]}
+        with (
+            patch.object(openalex_sdg, "get_cached_work", return_value=None),
+            patch.object(openalex_sdg, "get_cached_sdg_result", return_value=None),
+            patch.object(openalex_sdg, "classify_text_aurora", return_value=(response, "")) as aurora,
+            patch.object(openalex_sdg, "upsert_work"),
+            patch.object(openalex_sdg, "upsert_sdg_result"),
+        ):
+            result = openalex_sdg._enrich_and_classify_publication(
+                merged, session_factory=Mock, model="aurora-sdg-multi", user_agent="test",
+                semantic_scholar_api_key=None, enable_google_scholar=False,
+                serpapi_api_key=None, aurora_limiter=Mock(), cancel_event=threading.Event(),
+            )
+        self.assertEqual(aurora.call_args.args[1], "Shared work\nRepository abstract")
+        self.assertEqual(result.row["sdg_source"], "aurora_recheck_openalex_empty")
+        self.assertEqual(result.row["sdg_status"], "classified")
+        self.assertEqual(result.row["sdg_formatted"], "40% SDG 7 (Clean energy)")
+        self.assertEqual(result.row["openalex_aurora_response"], "[]")
+        self.assertEqual(result.row["openalex_aurora_status"], "empty")
+        self.assertEqual(result.row["openalex_x_sdgs"], "60% SDG 7 (Clean energy)")
+
+    def test_empty_openalex_recheck_reuses_cached_aurora_result(self) -> None:
+        publication = {
+            "publication_key": "openalex:W-EMPTY", "source": "openalex",
+            "source_record_key": "openalex:W-EMPTY", "title": "Clean energy adoption",
+            "abstract": "Evidence from households", "_openalex_aurora_sdgs": [],
+        }
+        text_for_sdg = "Clean energy adoption\nEvidence from households"
+        cached = {
+            "text_hash": openalex_sdg._hash_classification_text(text_for_sdg),
+            "sdg_response": json.dumps({"predictions": [
+                {"prediction": 0.65, "sdg": {"code": "7", "name": "Clean energy"}},
+            ]}),
+        }
+        with (
+            patch.object(openalex_sdg, "get_cached_work", return_value=None),
+            patch.object(openalex_sdg, "get_cached_sdg_result", return_value=cached) as lookup,
+            patch.object(openalex_sdg, "classify_text_aurora") as aurora,
+            patch.object(openalex_sdg, "upsert_work"),
+        ):
+            result = openalex_sdg._enrich_and_classify_publication(
+                publication, session_factory=Mock, model="aurora-sdg-multi", user_agent="test",
+                semantic_scholar_api_key=None, enable_google_scholar=False,
+                serpapi_api_key=None, aurora_limiter=Mock(), cancel_event=threading.Event(),
+            )
+        aurora.assert_not_called()
+        self.assertEqual(lookup.call_args.args[1], openalex_sdg.AURORA_FALLBACK_CACHE_MODEL)
+        self.assertEqual(result.row["sdg_source"], "aurora_recheck_openalex_empty")
+        self.assertEqual(result.row["sdg_formatted"], "65% SDG 7 (Clean energy)")
+
+    def test_failed_empty_openalex_recheck_keeps_original_result_visible(self) -> None:
+        publication = {
+            "publication_key": "openalex:W-EMPTY", "source": "openalex",
+            "source_record_key": "openalex:W-EMPTY", "title": "Clean energy adoption",
+            "abstract": "", "_openalex_aurora_sdgs": [],
+        }
+        with (
+            patch.object(openalex_sdg, "get_cached_work", return_value=None),
+            patch.object(openalex_sdg, "get_cached_sdg_result", return_value=None),
+            patch.object(openalex_sdg, "classify_text_aurora", return_value=(None, "http_error:503")),
+            patch.object(openalex_sdg, "upsert_work"),
+            patch.object(openalex_sdg, "upsert_sdg_result") as cached,
+        ):
+            result = openalex_sdg._enrich_and_classify_publication(
+                publication, session_factory=Mock, model="aurora-sdg-multi", user_agent="test",
+                semantic_scholar_api_key=None, enable_google_scholar=False,
+                serpapi_api_key=None, aurora_limiter=Mock(), cancel_event=threading.Event(),
+            )
+        cached.assert_not_called()
+        self.assertEqual(result.row["sdg_status"], "failed")
+        self.assertEqual(result.row["sdg_source"], "aurora_recheck_openalex_empty")
+        self.assertEqual(result.row["openalex_aurora_response"], "[]")
+        self.assertEqual(result.row["openalex_aurora_status"], "empty")
+
+    def test_aurora_fallback_uses_title_abstract_and_openalex_cutoff(self) -> None:
+        publication = {
+            "publication_key": "repo:2", "source": "repo", "source_record_key": "repo:2",
+            "title": "Clean energy adoption", "abstract": "Evidence from households",
+        }
+        response = {"predictions": [
+            {"prediction": 0.39, "sdg": {"code": "8", "name": "Decent work"}},
+            {"prediction": 0.4, "sdg": {"code": "7", "name": "Clean energy"}},
+        ]}
+        with (
+            patch.object(openalex_sdg, "get_cached_work", return_value=None),
+            patch.object(openalex_sdg, "get_cached_sdg_result", return_value=None),
+            patch.object(openalex_sdg, "classify_text_aurora", return_value=(response, "")) as aurora,
+            patch.object(openalex_sdg, "upsert_work"),
+            patch.object(openalex_sdg, "upsert_sdg_result") as cached,
+        ):
+            result = openalex_sdg._enrich_and_classify_publication(
+                publication, session_factory=Mock, model="aurora-sdg-multi", user_agent="test",
+                semantic_scholar_api_key=None, enable_google_scholar=False,
+                serpapi_api_key=None, aurora_limiter=Mock(), cancel_event=threading.Event(),
+                aurora_base_url="https://aurora.example/classify",
+            )
+        self.assertEqual(aurora.call_args.args[1], "Clean energy adoption\nEvidence from households")
+        self.assertEqual(result.row["sdg_source"], "aurora_fallback")
+        self.assertEqual(result.row["sdg_formatted"], "40% SDG 7 (Clean energy)")
+        self.assertEqual(result.row["sdg_status"], "classified")
+        self.assertEqual(cached.call_args.kwargs["model"], openalex_sdg.AURORA_FALLBACK_CACHE_MODEL)
+
+    def test_malformed_aurora_response_does_not_become_no_sdg(self) -> None:
+        self.assertIsNone(openalex_sdg.select_aurora_predictions({"predictions": [{"unexpected": True}]}))
+        self.assertEqual(openalex_sdg.select_aurora_predictions({"predictions": []}), {"predictions": []})
+
     def test_title_only_classification_is_marked_low_confidence(self) -> None:
         publication = {
             "publication_key": "openalex:W-TITLE-ONLY",
@@ -1578,6 +1711,12 @@ class CacheMigrationTests(unittest.TestCase):
                 "abstract_inverted_index": {"Shared": [0], "abstract": [1]},
                 "authorships": [{"author": {"display_name": "Jane Doe"}, "institutions": []}],
                 "open_access": {"is_oa": True, "oa_status": "gold"},
+                "sustainable_development_goals": [
+                    {"id": "https://openalex.org/sdgs/4", "display_name": "Quality Education", "score": 0.9}
+                ],
+                "x_sdgs": [
+                    {"id": "https://openalex.org/sdgs/10", "display_name": "Reduced inequalities", "score": 0.7}
+                ],
             }
         )
         dspace = normalize_dspace_object(
@@ -1631,7 +1770,9 @@ class CacheMigrationTests(unittest.TestCase):
             self.assertEqual(stats.total_source_records, 2)
             self.assertEqual(stats.duplicates_removed, 1)
             self.assertEqual(rows[0]["source_count"], 2)
-            classify.assert_called_once()
+            classify.assert_not_called()
+            self.assertEqual(rows[0]["sdg_source"], "openalex_aurora")
+            self.assertEqual(rows[0]["openalex_x_sdgs"], "70% SDG 10 (Reduced inequalities)")
 
             classify.reset_mock()
             second_rows, _ = openalex_sdg.fetch_publications_with_sdg(
@@ -1811,10 +1952,12 @@ class CacheMigrationTests(unittest.TestCase):
         }
         cache_db.upsert_sdg_result(
             publication_key=source_publication["publication_key"],
-            model="aurora-sdg-multi",
+            model=openalex_sdg.AURORA_FALLBACK_CACHE_MODEL,
             sdg_response=prediction,
             sdg_formatted="90% SDG 4 (Quality Education)",
-            text_hash=openalex_sdg._hash_classification_text(richer_abstract),
+            text_hash=openalex_sdg._hash_classification_text(
+                f"{source_publication['title']}\n{richer_abstract}"
+            ),
         )
 
         with (
@@ -1963,7 +2106,7 @@ class CacheMigrationTests(unittest.TestCase):
                 openalex_sdg,
                 "get_cached_sdg_result",
                 return_value={
-                    "text_hash": openalex_sdg._hash_classification_text(abstract),
+                    "text_hash": openalex_sdg._hash_classification_text(f"{incoming['title']}\n{abstract}"),
                     "sdg_response": json.dumps(cached_prediction),
                     "sdg_formatted": "90% SDG 4 (Quality Education)",
                     "sdg_note": "",

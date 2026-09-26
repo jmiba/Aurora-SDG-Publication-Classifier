@@ -31,7 +31,9 @@ Each fetched source record is stored verbatim (with its raw JSON) and linked to 
 
 ## SDG results
 
-Classifications are stored per (publication key, model) with the hash of the classified text so unchanged inputs are reused instead of re-classified.
+Self-run classifications are cached by publication, method identity, and input hash.
+
+The Aurora fallback and empty-list recheck share a cache identity for their title-plus-abstract input and 0.4 cutoff; export provenance distinguishes them. LLM identities include provider endpoint, model, and prompt. OpenAlex Aurora and `x_sdgs` come from the current fetched source record.
 
 - [[cache_db.py#upsert_sdg_result]] — persists a classification keyed by (publication key, model) with the input `text_hash`; foreign-keyed to `canonical_works`.
 - [[cache_db.py#get_cached_sdg_result]] — reads the cached classification for reuse decisions in [[enrichment#Classification]].

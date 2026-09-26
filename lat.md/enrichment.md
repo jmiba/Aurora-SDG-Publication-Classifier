@@ -1,6 +1,6 @@
 # Enrichment
 
-Per-publication abstract enrichment and Aurora SDG classification, with caching, rate limiting, and thread-pool concurrency.
+Per-publication abstract enrichment, OpenAlex-first Aurora classification, and optional independent LLM comparison, with caching and bounded concurrency.
 
 The entry point is the [[enrichment#Fetch pipeline]]; per-record work is [[enrichment#Per-publication enrichment]].
 
@@ -16,7 +16,7 @@ The top-level orchestrator fetches all selected sources, deduplicates, then enri
 
 One worker enriches and classifies a single publication, preferring cached data and only calling external services when needed.
 
-- [[openalex_sdg.py#_enrich_and_classify_publication]] — loads the cached work/abstract, attempts abstract enrichment, decides whether to reuse a cached SDG result or call Aurora, persists the canonical work and SDG result (see [[cache#Canonical publications]] and [[cache#SDG results]]), and returns a `_PublicationEnrichment` with stats.
+- [[openalex_sdg.py#_enrich_and_classify_publication]] — enriches abstracts, uses positive OpenAlex Aurora tags, and reuses or calls Aurora for empty or missing lists. It preserves the original OpenAlex response, exports `x_sdgs`, and optionally runs an independent LLM comparison; see [[cache#Canonical publications]] and [[cache#SDG results]].
 - [[openalex_sdg.py#_work_cache_changed]] — returns true when persistence would add provenance or a longer abstract.
 - [[openalex_sdg.py#_source_record_key_set]] — the set of source-record keys a publication represents, used to detect new provenance.
 
@@ -32,10 +32,17 @@ Abstracts are retrieved in a fixed fallback order: cached, then Semantic Scholar
 
 ## Classification
 
-Aurora SDG classification is rate-limited and cached by a hash of the classified text. A planned LLM-based classifier that reuses these same seams is described in [[llm-classifier]].
+Positive OpenAlex Aurora tags are primary; an empty list triggers a local Aurora recheck.
 
+Missing or malformed OpenAlex fields also trigger the Aurora fallback. Both calls use title plus enriched abstract and a 0.4 cutoff. `sdg_source` distinguishes `aurora_recheck_openalex_empty` from `aurora_fallback`; `openalex_aurora_response` retains the original `[]`. Experimental `x_sdgs` and the selected [[llm-classifier|independent LLM comparison]] stay separate.
+
+No goal at or above the cutoff produces a successful `no_sdg` result with an empty assignment. This is distinct from `failed`, which means no valid classifier response was obtained. The cutoff is fixed in code and must stay aligned with the chart filter and Aurora cache identity.
+
+- [[openalex_sdg.py#openalex_sdg_predictions]] — validates and converts OpenAlex SDG arrays into the presentation envelope; keeps an empty array distinct from a missing field.
+- [[openalex_sdg.py#select_aurora_predictions]] — validates self-run Aurora scores and keeps those at or above 0.4.
 - [[openalex_sdg.py#classify_text_aurora]] — POSTs the text to the Aurora endpoint for a model, returning `(json, note)`.
-- [[openalex_sdg.py#_RateLimiter]] — spaces request starts across workers without serializing response waits; the shared Aurora limiter uses `AURORA_MIN_INTERVAL_SECONDS`.
+- [[llm_sdg.py#classify_publication]] — sends title and abstract to a configured hosted model with structured output, validates evidence excerpts, and returns a decision or a fixed failure category.
+- [[openalex_sdg.py#_RateLimiter]] — spaces request starts across workers without serializing response waits; the shared Aurora limiter uses `AURORA_MIN_INTERVAL_SECONDS`, while the LLM limiter adapts to advertised minute quotas.
 - [[openalex_sdg.py#format_sdg_predictions]] — renders the Aurora `predictions` envelope into ordered `NN% SDG N (Name)` lines.
 - [[openalex_sdg.py#_hash_classification_text]] — SHA-256 of the classified text, stored as `text_hash` to decide cache reuse.
 - [[openalex_sdg.py#too_short_for_model]] — skips models that require a minimum word count, configured via `MIN_WORDS_BY_MODEL` (currently empty: the word-count-requiring OSDG model was removed from the public Aurora service).

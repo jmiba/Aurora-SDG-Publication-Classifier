@@ -59,6 +59,7 @@ def request_with_backoff(
         raise ValueError("retries must be at least 1")
 
     before_request: Optional[Callable[[], None]] = kw.pop("_before_request", None)
+    after_response: Optional[Callable[[Any], None]] = kw.pop("_after_response", None)
     request = getattr(session, method)
     for attempt in range(1, retries + 1):
         try:
@@ -71,8 +72,13 @@ def request_with_backoff(
             time.sleep(_backoff(attempt, base, cap, None))
             continue
 
+        if after_response:
+            after_response(response)
+
         if response.status_code in RETRYABLE_STATUS_CODES and attempt < retries:
             retry_after = response.headers.get("Retry-After")
+            if response.status_code == 429 and not retry_after:
+                retry_after = response.headers.get("ratelimit-reset")
             time.sleep(_backoff(attempt, base, cap, retry_after))
             continue
         response.raise_for_status()

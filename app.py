@@ -22,6 +22,7 @@ from typing import (
     Union,
     cast,
 )
+from urllib.parse import urlparse
 
 import altair as alt
 import networkx as nx
@@ -31,6 +32,7 @@ import requests
 import streamlit as st
 
 from fetch_jobs import discard_fetch_job, get_fetch_job, start_fetch_job
+from llm_sdg import MODEL_ID, LlmConfig
 from openalex_sdg import (
     AURORA_MODELS,
     DEFAULT_USER_AGENT,
@@ -59,6 +61,10 @@ SECRET_SEMANTIC_SCHOLAR_KEY = "semantic_scholar_api_key"
 SECRET_GOOGLE_SCHOLAR_ENABLED = "google_scholar_enabled"
 SECRET_DEFAULT_START = "advanced_options.default_from_date"
 SECRET_SERPAPI_KEY = "serpapi_api_key" # New constant for SerpApi Key
+SECRET_LLM_BASE_URL = "llm_provider_base_url"
+SECRET_LLM_API_KEY = "llm_provider_api_key"
+SECRET_LLM_MODEL = "llm_provider_model"
+SECRET_LLM_ENABLE_THINKING = "llm_provider_enable_thinking"
 _SECRETS: Dict[str, Any] = {}
 PREVIEW_COLUMNS = [
     "record_url",
@@ -69,6 +75,17 @@ PREVIEW_COLUMNS = [
     "type",
     "doi",
     "institutions",
+    "sdg_formatted",
+    "sdg_source",
+    "sdg_status",
+    "sdg_note",
+    "openalex_aurora_status",
+    "openalex_x_sdgs",
+    "openalex_x_sdgs_status",
+    "llm_sdgs",
+    "llm_status",
+    "llm_note",
+    "llm_evidence",
 ]
 PREVIEW_PAGE_SIZE = 25
 SPHERE_LATITUDE_STEPS = 16
@@ -97,17 +114,33 @@ CSV_FIELDNAMES = [
     "institution_names_raw",
     "abstract",
     "sdg_model",
+    "sdg_source",
     "sdg_response",
     "sdg_formatted",
     "sdg_note",
+    "sdg_status",
+    "sdg_evidence",
+    "sdg_classifier_version",
+    "openalex_aurora_response",
+    "openalex_aurora_status",
+    "openalex_x_sdgs",
+    "openalex_x_sdgs_status",
+    "llm_response",
+    "llm_sdgs",
+    "llm_status",
+    "llm_note",
+    "llm_evidence",
+    "llm_classifier_version",
+    "llm_provider_model",
+    "llm_prompt_version",
     "source_provenance_json",
 ]
 RESULT_SESSION_KEY = "fetch_result"
-RESULT_SCHEMA_VERSION = 3
-APP_VERSION = "1.1.7"
+RESULT_SCHEMA_VERSION = 5
+APP_VERSION = "1.1.8"
 APP_REPOSITORY_URL = "https://github.com/jmiba/Aurora-SDG-Publication-Classifier"
 MAX_EXPORT_FILENAME_LENGTH = 150
-SDG_THRESHOLD_PERCENT = 3.0
+SDG_THRESHOLD_PERCENT = 40.0
 FETCH_POLL_INTERVAL_SECONDS = 0.5
 FETCH_JOB_SESSION_KEY = "fetch_job_id"
 OA_STATUS_ORDER = ["diamond", "gold", "hybrid", "green", "bronze", "open", "closed", "unknown"]
@@ -144,6 +177,7 @@ class QuerySelection:
     serpapi_api_key: Optional[str]
     aurora_base_url: Optional[str]
     oai_sources: Tuple[OaiPmhSource, ...] = ()
+    llm_config: Optional[LlmConfig] = None
 
 
 SDG_COLORS = {
@@ -273,6 +307,17 @@ def resolve_aurora_base_url() -> Optional[str]:
     """Read the configured Aurora classifier base URL."""
     value = get_secret_text(SECRET_AURORA_BASE_URL)
     return value.rstrip("/") if value else None
+
+
+def resolve_llm_config() -> Optional[LlmConfig]:
+    """Read hosted inference configuration without exposing credentials in results."""
+    base_url = get_secret_text(SECRET_LLM_BASE_URL)
+    api_key = get_secret_text(SECRET_LLM_API_KEY)
+    if not base_url or not api_key:
+        return None
+    return LlmConfig(base_url=base_url, api_key=api_key,
+                     model=get_secret_text(SECRET_LLM_MODEL) or MODEL_ID,
+                     enable_thinking=get_secret_bool(SECRET_LLM_ENABLE_THINKING))
 
 
 def resolve_semantic_scholar_key() -> Optional[str]:
@@ -415,6 +460,15 @@ def aggregate_sdg_counts(rows: List[Dict[str, Any]]) -> List[Tuple[str, str, flo
     ]
 
 
+def llm_result_counts(rows: Sequence[Mapping[str, Any]]) -> Dict[str, int]:
+    """Separate valid empty decisions from rows without a valid LLM response."""
+    counts = {"classified": 0, "no_sdg": 0, "manual_review": 0, "failed": 0}
+    for row in rows:
+        status = str(row.get("llm_status") or "")
+        counts[status if status in {"classified", "no_sdg", "manual_review"} else "failed"] += 1
+    return counts
+
+
 def render_sdg_pie_chart(data: List[Tuple[str, str, float]], title: str):
     """Display an Altair donut chart summarizing SDG distribution."""
     if not data:
@@ -443,7 +497,7 @@ def render_sdg_pie_chart(data: List[Tuple[str, str, float]], title: str):
             ),
             tooltip=[
                 alt.Tooltip("SDG", title="Sustainable Development Goal"),
-                alt.Tooltip("Value", format=".1f", title="Concordance in %"),
+                alt.Tooltip("Value", format=".1f", title="Share of Aurora scores (%)"),
             ],
         )
         .properties(width=1650, height=450, title=title)
@@ -1691,11 +1745,11 @@ def render_publication_type_selector(
 
 
 def render_model_selector() -> str:
-    """Let the user pick which SDG classifier to run."""
-    st.subheader("4. SDG classifier", divider="green")
+    """Let the user choose primary SDGs and optional LLM comparison."""
+    st.subheader("4. SDG classification", divider="green")
     default_index = next((i for i, (name, _) in enumerate(AURORA_MODELS) if name == "aurora-sdg-multi"), 0)
     selected_index = st.selectbox(
-        "Choose a model",
+        "Choose SDG processing",
         options=range(len(AURORA_MODELS)),
         index=default_index,
         format_func=lambda index: AURORA_MODELS[index][1],
@@ -1777,6 +1831,7 @@ def build_query_params(selection: QuerySelection) -> Dict[str, Any]:
         "institutions": list(selection.institution_ids),
         "types": list(selection.publication_types),
         "model": selection.model,
+        "llm_version": selection.llm_config.identity if selection.model == "llm-independent" and selection.llm_config else None,
         "from": selection.from_date,
         "to": selection.to_date,
         "limit": selection.limit_rows,
@@ -1791,6 +1846,15 @@ def query_configuration_errors(selection: QuerySelection) -> List[str]:
             "OpenAlex fetches require `http_user_agent` in `.streamlit/secrets.toml` "
             "with a real contact email in `mailto:` form."
         )
+    if selection.model == "llm-independent" and selection.llm_config is None:
+        errors.append(
+            "Independent LLM comparison requires `llm_provider_base_url` and "
+            "`llm_provider_api_key` in `.streamlit/secrets.toml`."
+        )
+    if selection.model == "llm-independent" and selection.llm_config is not None:
+        endpoint = urlparse(selection.llm_config.base_url)
+        if endpoint.scheme != "https" or not endpoint.netloc or endpoint.username or endpoint.password or endpoint.query or endpoint.fragment:
+            errors.append("`llm_provider_base_url` must be an HTTPS API base URL without credentials or query parameters.")
     if selection.model != "skip" and not selection.aurora_base_url:
         errors.append(
             "SDG classification requires `aurora_base_url` in "
@@ -1927,6 +1991,7 @@ def execute_publication_fetch(
         enable_google_scholar=selection.google_scholar_enabled,
         serpapi_api_key=selection.serpapi_api_key,
         aurora_base_url=selection.aurora_base_url,
+        llm_config=selection.llm_config,
         extra_institution_ids=extra_institution_ids or None,
         progress_callback=progress_callback,
         cancel_check=cancel_check,
@@ -2299,6 +2364,23 @@ def render_result_charts(
     chart_data = aggregate_sdg_counts(chart_rows)
     st.write("")
     st.subheader("SDG distribution", divider="red")
+    has_llm_comparison = any(
+        row.get("llm_status") in {"classified", "no_sdg", "manual_review", "failed"}
+        for row in chart_rows
+    )
+    if has_llm_comparison:
+        counts = llm_result_counts(chart_rows)
+        st.caption(
+            "LLM decisions: "
+            f"{counts['classified']} classified, {counts['no_sdg']} no SDG, "
+            f"{counts['manual_review']} manual review, {counts['failed']} failed."
+        )
+        if counts["failed"]:
+            st.warning(
+                f"{counts['failed']} publication(s) have no valid LLM decision. "
+                "Check `llm_note` in the preview or export for the failure code.",
+                icon=":material/error:",
+            )
     chart_title = "selected publication" if len(chart_rows) == 1 else "all publications"
     if chart_title == "selected publication" and selected_title:
         chart_title = f"selected publication ({selected_title})"
@@ -2521,6 +2603,7 @@ def main() -> None:
         google_scholar_enabled=google_scholar_enabled,
         serpapi_api_key=serpapi_api_key,
         aurora_base_url=resolve_aurora_base_url(),
+        llm_config=resolve_llm_config() if model == "llm-independent" else None,
     )
     current_params = build_query_params(selection)
     fetch_state = cast(MutableMapping[str, Any], st.session_state)

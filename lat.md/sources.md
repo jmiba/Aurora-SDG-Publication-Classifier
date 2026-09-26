@@ -16,7 +16,7 @@ Source entries come from the tracked TOML registries (`dspace_sources.toml`, `oa
 
 Each adapter maps its native shape into the same keys so downstream enrichment and export are source-agnostic.
 
-- [[publication_sources.py#normalize_openalex_work]] — OpenAlex work to contract; reconstructs the abstract from `abstract_inverted_index` via [[publication_sources.py#_reconstruct_openalex_abstract]].
+- [[publication_sources.py#normalize_openalex_work]] — OpenAlex work to contract; reconstructs the abstract from `abstract_inverted_index` via [[publication_sources.py#_reconstruct_openalex_abstract]] and carries `sustainable_development_goals` and experimental `x_sdgs` for classification and comparison.
 - [[publication_sources.py#normalize_dspace_object]] — DSpace search object to contract; abstract via [[publication_sources.py#_abstract_from_metadata]], OA via [[publication_sources.py#_dspace_oa]].
 - [[publication_sources.py#normalize_oai_record]] — OAI-PMH Dublin Core record to contract; type via [[publication_sources.py#_oai_type]], OA via [[publication_sources.py#_oai_oa]], record URL via [[publication_sources.py#_oai_record_url]].
 - [[publication_sources.py#normalize_hal_document]] — HAL Search API document to contract; type via [[publication_sources.py#_hal_type]].
@@ -26,7 +26,7 @@ Each adapter maps its native shape into the same keys so downstream enrichment a
 
 Each adapter paginates its native API, applies local type/date filtering where the API cannot, and respects cancellation and row limits.
 
-- [[publication_sources.py#fetch_openalex_records]] — cursor-paginated OpenAlex works for a filter.
+- [[publication_sources.py#fetch_openalex_records]] — cursor-paginated OpenAlex works for a filter, selecting both SDG fields with the publication metadata.
 - [[publication_sources.py#fetch_dspace_records]] — paginated DSpace REST search per entity type.
 - [[publication_sources.py#fetch_oai_records]] — OAI-PMH `ListRecords` with resumption-token paging and a local publication-date filter; XML is parsed safely via [[publication_sources.py#_request_xml]] (size cap and DOCTYPE/ENTITY guard). The first page request sends the selected period start as the OAI-PMH `from` parameter to prune unchanged old records server-side (per-source `send_from` opt-out); `until` is never sent because datestamps, not `dc:date`, are filtered, so the local date filter remains authoritative.
 - [[publication_sources.py#fetch_hal_records]] — HAL Search API paging with Solr date-range filtering.
@@ -36,5 +36,5 @@ Each adapter paginates its native API, applies local type/date filtering where t
 Cross-source duplicates are merged by DOI first, then by a stable title/year/first-author hash, preserving provenance from every source.
 
 - [[publication_sources.py#publication_deduplication_key]] — DOI or metadata-based dedup key.
-- [[publication_sources.py#deduplicate_publications]] — groups records by key, merges via [[publication_sources.py#_merge_publication]], and records per-source provenance.
+- [[publication_sources.py#deduplicate_publications]] — groups records by key, merges via [[publication_sources.py#_merge_publication]], and records per-source provenance. OpenAlex SDG fields survive a merge even when a repository record appears first; an empty Aurora list stays distinct from a missing field so enrichment can recheck it.
 - [[publication_sources.py#reconcile_oa_pair]] — keeps the `is_oa` boolean and `oa_status` string internally consistent across merges.

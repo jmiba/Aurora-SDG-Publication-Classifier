@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.8] - 2026-09-26
+
+### Added
+
+- Export the experimental OpenAlex `x_sdgs` field and optional independent hosted LLM decisions in separate comparison columns.
+- Preserve the original OpenAlex Aurora response and mark local rechecks of empty OpenAlex SDG lists in the export.
+
+### Changed
+
+- Prefer positive OpenAlex Aurora assignments. Recheck empty or unavailable OpenAlex SDG lists with `aurora-sdg-multi` using the title and available abstract, retaining scores at or above 0.4.
+- Explain that the 0.4 cutoff and classifier limitations can leave publications without an assigned SDG; document the current fixed threshold configuration.
+
 ## [1.1.7] - 2026-09-22
 
 ### Removed
@@ -194,7 +206,8 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   tracked source tree.
 - Required a non-placeholder contact address before OpenAlex queries can run.
 
-[Unreleased]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/1.1.7...HEAD
+[Unreleased]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/1.1.8...HEAD
+[1.1.8]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/1.1.7...1.1.8
 [1.1.7]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/1.1.6...1.1.7
 [1.1.6]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/1.1.5...1.1.6
 [1.1.5]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/1.1.4...1.1.5

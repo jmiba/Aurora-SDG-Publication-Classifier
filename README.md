@@ -2,7 +2,7 @@
 
 [![DOI](https://img.shields.io/badge/DOI-10.5281%2Fzenodo.22050496-blue)](https://doi.org/10.5281/zenodo.22050496)
 
-This Streamlit app explores publications from OpenAlex and any number of configured DSpace or OAI-PMH repositories. One run fetches every selected source, normalizes and deduplicates the records, enriches missing abstracts, runs each canonical publication through Aurora’s Sustainable Development Goals (SDG) classifiers once, and produces visual and downloadable results.
+This Streamlit app explores publications from OpenAlex and any number of configured DSpace or OAI-PMH repositories. One run fetches every selected source, normalizes and deduplicates the records, enriches missing abstracts, uses OpenAlex's Aurora SDG classification when available, and produces visual and downloadable results.
 
 ## What you can do
 
@@ -10,9 +10,9 @@ This Streamlit app explores publications from OpenAlex and any number of configu
 - **Link repositories to OpenAlex**: Repository sources can carry their OpenAlex and ROR institution IDs. When OpenAlex and a linked repository are selected together, the configured institution is used automatically. For an OpenAlex-only query, search the institution registry or paste an ID as before.
 - **Use generic DSpace sources**: Configure public DSpace REST APIs through repeatable `[[dspace_sources]]` entries. SWPS SHARE is the initial registry entry, not a special code path.
 - **Harvest OAI-PMH sources**: Configure standard OAI-PMH endpoints through repeatable `[[oai_sources]]` entries. The Viadrina OPUS publication server is included as the initial source.
-- **Set filters**: Select one or more publication types, an SDG classifier model, a time window, and an optional record limit. Limited multi-source results are selected newest-first after deduplication rather than by source order.
+- **Set filters**: Select one or more publication types, whether to run the optional hosted LLM comparison, a time window, and an optional record limit. Limited multi-source results are selected newest-first after deduplication rather than by source order.
 - **Deduplicate automatically**: Exact normalized DOI matches, or exact normalized title/year/first-author matches, are merged before enrichment and classification.
-- **Fetch SDG predictions**: Canonical publications and classifications are cached locally in `cache.sqlite3` to avoid redundant Aurora calls.
+- **Fetch SDG results**: Positive OpenAlex Aurora tags are primary. When OpenAlex returns an empty list or no usable field, the app reuses a cached Aurora result or calls Aurora on the title and abstract with a 0.4 score cutoff. The original OpenAlex response, experimental `x_sdgs`, and optionally hosted LLM decisions remain available for comparison. Canonical publications and self-run classifications are cached locally in `cache.sqlite3`.
 - **Cancel long fetches**: Fetching runs outside Streamlit's script thread, so the live progress panel remains responsive and can cooperatively stop source, enrichment, and classification work.
 - **Enrich abstracts**: If all selected source records lack an abstract, the app can fall back to Semantic Scholar and Google Scholar.
 - **Inspect results instantly**: The “Preview” section shows 25 rows per page. Focus choices stay bounded to the current page or 100 title, author, and DOI search matches, and a selected row can drive the SDG chart.
@@ -57,13 +57,16 @@ graph TD
     G -->|No| H
     I -->|Found| D
     I -->|Missing| H["Use title for SDG classification"]
-    D --> J{"SDG cached?"}
+    D --> J{"OpenAlex Aurora tags assigned?"}
     H --> J
-    J -->|Cache valid| K["Reuse SDG results"]
-    J -->|Needs run| L["Call Aurora classifier"]
-    L --> M["Store SDG and abstract in cache"]
-    K --> M
-    M --> N["Source-aware preview and charts"]
+    J -->|Yes| K["Use OpenAlex Aurora tags"]
+    J -->|Empty or missing| L["Reuse cached or call Aurora at 0.4 cutoff"]
+    K --> M["Add OpenAlex x_sdgs comparison"]
+    L --> M
+    M --> P{"LLM comparison selected?"}
+    P -->|Yes| Q["Reuse cached or call hosted LLM"]
+    P -->|No| N["Source-aware preview and charts"]
+    Q --> N
     N --> O["Download CSV or XLSX"]
 ```
 
@@ -72,11 +75,17 @@ graph TD
 1. **Source fetch**: OpenAlex uses either the manually selected institution or the institution IDs linked to the selected repository sources, plus the lineage, date and selected publication types. Each selected DSpace API is queried independently with its configured Discovery profile, scope and applicable entity types. DSpace `Book` is queried only once when monographs, book chapters, or both are selected; `dc.type` metadata separates the returned records locally. With a result limit, DSpace deliberately collects up to that many candidates per entity type so the final newest-first, post-deduplication cap is not biased toward the first type queried. OAI-PMH sources are harvested with `ListRecords`, follow opaque `resumptionToken` values, skip deleted records, and normalize Dublin Core metadata. OAI-PMH `from` and `until` describe metadata-update dates rather than publication dates, so the app harvests the configured set and applies the selected publication period locally. When a record limit is set, OAI-PMH candidates are selected newest-first only after the complete harvest. Protocol failures returned by one OAI-PMH endpoint are reported for that source while other selected sources continue. Repository media and file URLs are not fetched.
 2. **Normalization and deduplication**: Source-qualified record IDs remain preserved while exact DOI or exact title/year/first-author matches become one canonical publication. Fuzzy similarity is not used for automatic merging.
 3. **Caching**: `source_records` preserves raw source responses, `canonical_works` stores merged publications, and `sdg_results_v2` stores classifications with the hash of the classified text. Cache updates preserve accumulated provenance and richer abstracts when a later query uses fewer sources. The legacy `works` and `sdg_results` tables remain intact and are copied additively on first use.
-4. **Enrichment and SDG classification**: After deduplication, independent publications are processed concurrently in a bounded eight-worker pool, with a separate reusable HTTP session per worker. Cache access remains synchronized, and Aurora request starts are globally spaced by at least 0.12 seconds; workers reserve request slots under a lock and sleep independently until their slot. Depending on the model, the selected abstract or title is sent to Aurora once per canonical publication; an unchanged text hash reuses the previous result. A classification based only on a title is marked `low_confidence:title_only_no_abstract` in `sdg_note` so downstream users can distinguish it from abstract-based results.
+4. **Enrichment and SDG classification**: After deduplication, canonical publications are processed concurrently. Positive OpenAlex `sustainable_development_goals` tags are primary. An empty OpenAlex list or unavailable field triggers a cached or new `aurora-sdg-multi` call with the title and enriched abstract, retaining scores of at least 0.4. Empty lists are rechecked because the OpenAlex response does not say why it contains no tags; the original `[]` stays in the export. Aurora spaces request starts by at least 0.12 seconds. OpenAlex `x_sdgs` is exported as an experimental comparison. Only when selected, the independent LLM sends the title and enriched abstract to the configured hosted endpoint, validates structured decisions and exact evidence excerpts, and stores results in separate comparison columns. The LLM uses up to two workers, starts with 0.5-second request spacing, adapts to an advertised provider minute quota, and honors `ratelimit-reset` on HTTP 429. A valid LLM `no_sdg` decision is cached; provider and schema failures receive a non-sensitive `llm_note` and can be retried. A title-only result is marked `low_confidence:title_only_no_abstract`.
 5. **Abstract enrichment**: DSpace abstracts are read from both `dc.abstract*` and standard `dc.description.abstract*` metadata; OAI-PMH abstracts come from `dc:description`, preferring an English description when one is present. The richer of current source text and cached text is reused before external fallbacks:
     - **Semantic Scholar**: Called via its official API using the paper's DOI. Requires an optional API key. If the API rejects configured credentials with HTTP 401 or 403, the app disables Semantic Scholar for the rest of that fetch, continues with other configured fallbacks, and shows a warning without exposing the key.
     - **Google Scholar**: Uses [SerpApi](https://serpapi.com/) when a key is provided; otherwise falls back to `scholarly` with free proxies (less reliable).
-6. **Exports**: CSV and XLSX include canonical IDs, source-qualified record IDs, source URLs, source counts and provenance alongside the existing publication and SDG fields.
+6. **Exports**: CSV and XLSX include canonical IDs, source-qualified record IDs, source URLs, source counts and provenance. Primary `sdg_*` fields include `sdg_source`: `openalex_aurora` for positive OpenAlex tags, `aurora_recheck_openalex_empty` for an empty-list recheck, or `aurora_fallback` when OpenAlex tags are unavailable. `openalex_aurora_response` and `openalex_aurora_status` retain the original field, including `[]` with status `empty`. `openalex_x_sdgs` and `llm_*` fields hold comparisons. `openalex_x_sdgs_status` distinguishes an empty result from an unavailable field, and `llm_status=not_run` means the optional comparison was not selected.
+
+## Why a publication can have no SDG
+
+[OpenAlex reports only Aurora goals that pass its 0.4 relevance cutoff](https://help.openalex.org/data/sdgs/). The app applies the same 0.4 cutoff to locally requested Aurora scores. If no goal reaches the cutoff, `sdg_status` is `no_sdg` and `sdg_formatted` is blank, even when a publication appears relevant to a reader. The model can also miss a relevant goal, especially when the available title or abstract gives it too little evidence. A blank SDG field is therefore not a verified judgment that the publication is unrelated to every goal.
+
+When OpenAlex returns `[]`, the app rechecks the title and available abstract with Aurora and keeps the original `[]` in `openalex_aurora_response`. The recheck can still return `no_sdg`. A `failed` status instead means the app did not obtain a valid classification; inspect `sdg_note` and `sdg_source` to distinguish it from a successful result below the cutoff.
 
 ## Getting started
 
@@ -225,8 +234,14 @@ The app relies on Streamlit’s secrets mechanism for API keys and optional untr
 # Replace the reserved address below with a real contact email before using OpenAlex.
 http_user_agent = "Aurora-SDG-Publication-Classifier/1.0 (mailto:replace-me@your-institution.invalid)"
 
-# Base URL for the Aurora classifier. Required unless SDG classification is skipped.
+# Base URL for the Aurora fallback, required when SDG classification is enabled.
 aurora_base_url = "https://aurora-sdg.labs.vu.nl/classifier/classify"
+
+# For independent LLM classification, configure an HTTPS OpenAI-compatible API.
+# llm_provider_base_url = "https://your-provider.example/v1"
+# llm_provider_api_key = "YOUR_HOSTED_INFERENCE_API_KEY"
+# llm_provider_model = "Qwen/Qwen3.8-27B"
+# llm_provider_enable_thinking = false
 
 # An optional API key for Semantic Scholar to improve abstract retrieval rates.
 # See: https://www.semanticscholar.org/product/api
@@ -243,7 +258,11 @@ serpapi_api_key = "YOUR_SERPAPI_API_KEY"
 default_from_date = "2020-01-01"
 ```
 - `http_user_agent` is required for OpenAlex and must contain a non-placeholder contact email in `mailto:` form; OpenAlex runs are disabled otherwise.
-- `aurora_base_url` is required when an SDG classifier is selected. It can point to the public Aurora service shown above or a compatible self-hosted deployment.
+- `aurora_base_url` is required when SDG classification is enabled because publications without OpenAlex Aurora tags need a fallback. The optional independent LLM comparison uses `llm_provider_base_url` and `llm_provider_api_key`; its default model is `Qwen/Qwen3.8-27B` unless `llm_provider_model` is set. The endpoint must support OpenAI-compatible chat completions with JSON-schema structured output. Publication titles and abstracts are sent to that provider only when the comparison is selected.
+- The Aurora cutoff is currently fixed at 0.4 in the application, not configurable in `secrets.toml` or another settings file. If OpenAlex changes its cutoff, update the local cutoff, chart threshold, and Aurora cache identity together. Changing the local cutoff cannot recover scores that OpenAlex has already omitted from its response.
+- For Qwen3.8, requests disable extended thinking by default to reduce per-publication latency. Set `llm_provider_enable_thinking = true` to restore it. Other models keep their provider default unless this setting is explicit. Changing the effective mode creates a separate cache identity, so the first run in the new mode classifies rows again. Existing cache entries are preserved.
+- The independent LLM prompt assesses substantive research questions and outcomes without requiring SDG terms in the text. Prompt changes create a new cache identity, so a new run reclassifies earlier `no_sdg` results while preserving their old cache entries.
+- The independent LLM returns zero, one, or several SDGs with exact text evidence. An empty `no_sdg` decision is a successful result. Its decisions, status, evidence, provider model, and prompt version are exported in `llm_*` columns; provider failures use non-sensitive `llm_note` categories. The SDG distribution chart always shows the primary Aurora-based classification.
 - `semantic_scholar_api_key` and `serpapi_api_key` are optional but highly recommended for reliable abstract retrieval.
 - `google_scholar_enabled` controls the final Google Scholar lookup. Without SerpApi, the app uses scholarly free proxies only when the optional profile is installed; otherwise it reports that the lookup is skipped.
 

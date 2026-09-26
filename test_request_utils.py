@@ -69,6 +69,32 @@ class RequestWithBackoffTests(unittest.TestCase):
         self.assertEqual(session.get.call_count, 2)
         sleep.assert_called_once_with(4.0)
 
+    def test_rate_limit_reset_header_is_used_for_429(self) -> None:
+        session = Mock()
+        limited = response(429)
+        limited.headers["ratelimit-reset"] = "54"
+        session.post.side_effect = [limited, response(200)]
+        observe = Mock()
+
+        with patch("request_utils.time.sleep") as sleep:
+            result = request_with_backoff(
+                session, "post", "https://example.test/resource",
+                retries=2, cap=90, _after_response=observe,
+            )
+
+        self.assertEqual(result.status_code, 200)
+        sleep.assert_called_once_with(54.0)
+        self.assertEqual(observe.call_count, 2)
+
+    def test_advertised_minute_limit_paces_later_llm_requests(self) -> None:
+        limiter = openalex_sdg._RateLimiter(0.5)
+        limited = response(200)
+        limited.headers["x-ratelimit-limit-minute"] = "10"
+        with patch.object(openalex_sdg.time, "monotonic", return_value=10.0):
+            limiter.observe_minute_limit(limited)
+        self.assertEqual(limiter._min_interval, 6.0)
+        self.assertEqual(limiter._next_start, 16.0)
+
     def test_transport_errors_are_retried_with_shared_backoff(self) -> None:
         session = Mock()
         session.get.side_effect = [requests.ConnectionError("offline"), response(200)]

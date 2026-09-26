@@ -785,6 +785,8 @@ def normalize_openalex_work(work: Mapping[str, Any]) -> Dict[str, Any]:
         ),
         "institution_affiliations_json": json.dumps(unique_affiliations, ensure_ascii=False),
         "abstract": _reconstruct_openalex_abstract(work.get("abstract_inverted_index")),
+        "_openalex_aurora_sdgs": work.get("sustainable_development_goals"),
+        "_openalex_x_sdgs": work.get("x_sdgs"),
         "_raw_record": dict(work),
     }
 
@@ -1054,7 +1056,10 @@ def fetch_openalex_records(
     """Fetch and normalize OpenAlex records without enrichment or classification."""
     params: Dict[str, Any] = {
         "filter": filter_value,
-        "select": "id,display_name,title,publication_date,doi,abstract_inverted_index,type,language,open_access,authorships",
+        "select": (
+            "id,display_name,title,publication_date,doi,abstract_inverted_index,type,"
+            "language,open_access,authorships,sustainable_development_goals,x_sdgs"
+        ),
         "per-page": OPENALEX_PER_PAGE,
         "cursor": "*",
     }
@@ -1252,6 +1257,10 @@ def _merge_publication(base: Dict[str, Any], incoming: Mapping[str, Any]) -> Non
         base["doi"] = incoming.get("doi")
     if not base.get("openalex_id") and incoming.get("openalex_id"):
         base["openalex_id"] = incoming.get("openalex_id")
+    if incoming.get("openalex_id"):
+        for field in ("_openalex_aurora_sdgs", "_openalex_x_sdgs"):
+            if field in incoming:
+                base[field] = incoming[field]
 
     base_oa, current_status = reconcile_oa_pair(base.get("is_oa"), base.get("oa_status"))
     incoming_oa, incoming_status = reconcile_oa_pair(
