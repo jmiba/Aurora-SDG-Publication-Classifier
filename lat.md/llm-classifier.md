@@ -8,7 +8,7 @@ This is a separate classification method, not an Aurora quality-control pass. Th
 
 Give users a selectable, open-weights LLM comparison alongside the primary Aurora classification.
 
-- Classify each canonical publication from its title and available abstract, without using Aurora or `x_sdgs` results as LLM input or decision evidence.
+- Classify each canonical publication from its title and available abstract, without using Aurora or current OpenAlex SDGs as LLM input or decision evidence.
 - Permit an empty SDG set when the supplied text does not support a substantive SDG dimension.
 - Preserve the validated decision, evidence excerpts, and model and prompt identity separately from Aurora results so comparisons remain possible.
 - Keep primary `sdg_*` fields based on positive OpenAlex Aurora tags, the empty-list Aurora recheck, or the missing-field fallback; export LLM decisions only in `llm_*` columns.

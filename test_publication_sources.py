@@ -12,6 +12,8 @@ from datetime import date
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+import requests
+
 import cache_db
 import openalex_sdg
 from publication_sources import (
@@ -150,7 +152,45 @@ class PublicationSourceTests(unittest.TestCase):
         )
         selected = session.calls[0]["params"]["select"].split(",")
         self.assertIn("sustainable_development_goals", selected)
-        self.assertIn("x_sdgs", selected)
+        self.assertIn("sustainable_development_goals_aurora", selected)
+        self.assertNotIn("x_sdgs", selected)
+
+    def test_openalex_fetch_retries_if_temporary_aurora_field_is_removed(self) -> None:
+        response = requests.Response()
+        response.status_code = 400
+        response._content = (
+            b'{"message":"sustainable_development_goals_aurora is not a valid select field"}'
+        )
+        response.url = "https://api.openalex.org/works"
+        selections = []
+
+        def request_page(_session, _url, *, params, headers):
+            selections.append(params["select"])
+            if len(selections) == 1:
+                raise requests.HTTPError(response=response)
+            return {"meta": {"count": 0}, "results": []}
+
+        with patch("publication_sources._request_json", side_effect=request_page):
+            records, count = fetch_openalex_records(
+                FakeSession([]), filter_value="institutions.id:I1",
+                work_type="article", user_agent="test",
+            )
+        self.assertEqual((records, count), ([], 0))
+        self.assertIn("sustainable_development_goals_aurora", selections[0])
+        self.assertNotIn("sustainable_development_goals_aurora", selections[1])
+        self.assertIn("sustainable_development_goals", selections[1])
+
+    def test_openalex_fetch_does_not_mask_other_bad_requests(self) -> None:
+        response = requests.Response()
+        response.status_code = 400
+        response._content = b'{"message":"invalid institution filter"}'
+        response.url = "https://api.openalex.org/works"
+        with patch("publication_sources._request_json", side_effect=requests.HTTPError(response=response)):
+            with self.assertRaises(requests.HTTPError):
+                fetch_openalex_records(
+                    FakeSession([]), filter_value="institutions.id:I1",
+                    work_type="article", user_agent="test",
+                )
 
     def test_parse_multiple_generic_dspace_sources(self) -> None:
         sources = parse_dspace_sources(
@@ -1222,8 +1262,8 @@ class CacheMigrationTests(unittest.TestCase):
         openalex = normalize_openalex_work({
             "id": "https://openalex.org/W-SDG", "title": "Shared work",
             "doi": "10.1234/shared-sdg", "authorships": [],
-            "sustainable_development_goals": [],
-            "x_sdgs": [{"id": "https://openalex.org/sdgs/7", "display_name": "Clean energy", "score": 0.6}],
+            "sustainable_development_goals_aurora": [],
+            "sustainable_development_goals": [{"id": "https://openalex.org/sdgs/7", "display_name": "Clean energy", "score": 0.6}],
         })
         merged = deduplicate_publications([repository, openalex])[0]
         self.assertEqual(merged["_openalex_aurora_sdgs"], [])
@@ -1249,7 +1289,7 @@ class CacheMigrationTests(unittest.TestCase):
         self.assertEqual(result.row["sdg_formatted"], "40% SDG 7 (Clean energy)")
         self.assertEqual(result.row["openalex_aurora_response"], "[]")
         self.assertEqual(result.row["openalex_aurora_status"], "empty")
-        self.assertEqual(result.row["openalex_x_sdgs"], "60% SDG 7 (Clean energy)")
+        self.assertEqual(result.row["openalex_sdgs"], "60% SDG 7 (Clean energy)")
 
     def test_empty_openalex_recheck_reuses_cached_aurora_result(self) -> None:
         publication = {
@@ -1711,10 +1751,10 @@ class CacheMigrationTests(unittest.TestCase):
                 "abstract_inverted_index": {"Shared": [0], "abstract": [1]},
                 "authorships": [{"author": {"display_name": "Jane Doe"}, "institutions": []}],
                 "open_access": {"is_oa": True, "oa_status": "gold"},
-                "sustainable_development_goals": [
+                "sustainable_development_goals_aurora": [
                     {"id": "https://openalex.org/sdgs/4", "display_name": "Quality Education", "score": 0.9}
                 ],
-                "x_sdgs": [
+                "sustainable_development_goals": [
                     {"id": "https://openalex.org/sdgs/10", "display_name": "Reduced inequalities", "score": 0.7}
                 ],
             }
@@ -1772,7 +1812,7 @@ class CacheMigrationTests(unittest.TestCase):
             self.assertEqual(rows[0]["source_count"], 2)
             classify.assert_not_called()
             self.assertEqual(rows[0]["sdg_source"], "openalex_aurora")
-            self.assertEqual(rows[0]["openalex_x_sdgs"], "70% SDG 10 (Reduced inequalities)")
+            self.assertEqual(rows[0]["openalex_sdgs"], "70% SDG 10 (Reduced inequalities)")
 
             classify.reset_mock()
             second_rows, _ = openalex_sdg.fetch_publications_with_sdg(

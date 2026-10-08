@@ -79,8 +79,8 @@ OPENALEX_WORK_TYPES = (
 )
 
 AURORA_MODELS = [
-    ("aurora-sdg-multi", "OpenAlex Aurora SDGs; recheck empty or missing lists"),
-    ("llm-independent", "OpenAlex/Aurora SDGs + independent LLM comparison"),
+    ("aurora-sdg-multi", "Aurora SDGs: use available OpenAlex tags, otherwise run locally"),
+    ("llm-independent", "Aurora SDGs + independent LLM comparison"),
     ("skip", "Skip SDG classification (no Aurora API calls)"),
 ]
 
@@ -838,7 +838,7 @@ def _enrich_and_classify_publication(
     sdg_source = ""
     work_written_for_classification = False
     openalex_aurora = openalex_sdg_predictions(publication.get("_openalex_aurora_sdgs"))
-    openalex_x = openalex_sdg_predictions(publication.get("_openalex_x_sdgs"))
+    openalex_current = openalex_sdg_predictions(publication.get("_openalex_sdgs"))
 
     openalex_aurora_status = (
         "classified" if openalex_aurora and openalex_aurora["predictions"]
@@ -951,9 +951,9 @@ def _enrich_and_classify_publication(
 
     sdg_raw = json.dumps(sdg_json, ensure_ascii=False) if sdg_json is not None else ""
     llm_raw = json.dumps(llm_decision, ensure_ascii=False) if llm_decision is not None else ""
-    x_status = (
-        "classified" if openalex_x and openalex_x["predictions"]
-        else "no_sdg" if openalex_x is not None else "unavailable"
+    openalex_current_status = (
+        "classified" if openalex_current and openalex_current["predictions"]
+        else "no_sdg" if openalex_current is not None else "unavailable"
     )
     row_data = {
         key: value for key, value in publication.items() if not str(key).startswith("_")
@@ -969,7 +969,7 @@ def _enrich_and_classify_publication(
             "sdg_status": sdg_status,
             "sdg_evidence": "",
             "sdg_classifier_version": (
-                "openalex:sustainable_development_goals" if sdg_source == "openalex_aurora"
+                "openalex:sustainable_development_goals_aurora" if sdg_source == "openalex_aurora"
                 else AURORA_FALLBACK_CACHE_MODEL if sdg_source in {
                     "aurora_fallback", "aurora_recheck_openalex_empty"
                 } else ""
@@ -979,8 +979,8 @@ def _enrich_and_classify_publication(
                 if openalex_aurora is not None else ""
             ),
             "openalex_aurora_status": openalex_aurora_status,
-            "openalex_x_sdgs": format_sdg_predictions(openalex_x),
-            "openalex_x_sdgs_status": x_status,
+            "openalex_sdgs": format_sdg_predictions(openalex_current),
+            "openalex_sdgs_status": openalex_current_status,
             "llm_response": llm_raw,
             "llm_sdgs": format_decision(llm_decision) if llm_decision is not None else "",
             "llm_status": llm_status,

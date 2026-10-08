@@ -785,8 +785,8 @@ def normalize_openalex_work(work: Mapping[str, Any]) -> Dict[str, Any]:
         ),
         "institution_affiliations_json": json.dumps(unique_affiliations, ensure_ascii=False),
         "abstract": _reconstruct_openalex_abstract(work.get("abstract_inverted_index")),
-        "_openalex_aurora_sdgs": work.get("sustainable_development_goals"),
-        "_openalex_x_sdgs": work.get("x_sdgs"),
+        "_openalex_aurora_sdgs": work.get("sustainable_development_goals_aurora"),
+        "_openalex_sdgs": work.get("sustainable_development_goals"),
         "_raw_record": dict(work),
     }
 
@@ -1058,7 +1058,8 @@ def fetch_openalex_records(
         "filter": filter_value,
         "select": (
             "id,display_name,title,publication_date,doi,abstract_inverted_index,type,"
-            "language,open_access,authorships,sustainable_development_goals,x_sdgs"
+            "language,open_access,authorships,sustainable_development_goals,"
+            "sustainable_development_goals_aurora"
         ),
         "per-page": OPENALEX_PER_PAGE,
         "cursor": "*",
@@ -1070,7 +1071,24 @@ def fetch_openalex_records(
         _ensure_not_cancelled(cancel_check)
         if progress_callback:
             progress_callback("Fetching OpenAlex records")
-        data = _request_json(session, OPENALEX_WORKS_URL, params=params, headers=headers)
+        try:
+            data = _request_json(session, OPENALEX_WORKS_URL, params=params, headers=headers)
+        except requests.HTTPError as exc:
+            response = exc.response
+            if response is None or response.status_code != 400:
+                raise
+            try:
+                message = str(response.json().get("message") or "")
+            except (ValueError, AttributeError):
+                raise exc from None
+            if "sustainable_development_goals_aurora is not a valid select field" not in message:
+                raise
+            # OpenAlex says this frozen Aurora field will disappear in November 2026.
+            # Keep fetching its current SDGs; local Aurora handles the missing old field.
+            params["select"] = params["select"].replace(
+                ",sustainable_development_goals_aurora", ""
+            )
+            data = _request_json(session, OPENALEX_WORKS_URL, params=params, headers=headers)
         meta = data.get("meta") or {}
         if total_expected is None:
             total_expected = meta.get("count") if isinstance(meta, Mapping) else None
@@ -1258,7 +1276,7 @@ def _merge_publication(base: Dict[str, Any], incoming: Mapping[str, Any]) -> Non
     if not base.get("openalex_id") and incoming.get("openalex_id"):
         base["openalex_id"] = incoming.get("openalex_id")
     if incoming.get("openalex_id"):
-        for field in ("_openalex_aurora_sdgs", "_openalex_x_sdgs"):
+        for field in ("_openalex_aurora_sdgs", "_openalex_sdgs"):
             if field in incoming:
                 base[field] = incoming[field]
 

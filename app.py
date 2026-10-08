@@ -80,8 +80,8 @@ PREVIEW_COLUMNS = [
     "sdg_status",
     "sdg_note",
     "openalex_aurora_status",
-    "openalex_x_sdgs",
-    "openalex_x_sdgs_status",
+    "openalex_sdgs",
+    "openalex_sdgs_status",
     "llm_sdgs",
     "llm_status",
     "llm_note",
@@ -123,8 +123,8 @@ CSV_FIELDNAMES = [
     "sdg_classifier_version",
     "openalex_aurora_response",
     "openalex_aurora_status",
-    "openalex_x_sdgs",
-    "openalex_x_sdgs_status",
+    "openalex_sdgs",
+    "openalex_sdgs_status",
     "llm_response",
     "llm_sdgs",
     "llm_status",
@@ -136,8 +136,8 @@ CSV_FIELDNAMES = [
     "source_provenance_json",
 ]
 RESULT_SESSION_KEY = "fetch_result"
-RESULT_SCHEMA_VERSION = 5
-APP_VERSION = "1.1.8"
+RESULT_SCHEMA_VERSION = 6
+APP_VERSION = "1.1.9"
 APP_REPOSITORY_URL = "https://github.com/jmiba/Aurora-SDG-Publication-Classifier"
 MAX_EXPORT_FILENAME_LENGTH = 150
 SDG_THRESHOLD_PERCENT = 40.0

@@ -16,7 +16,7 @@ The top-level orchestrator fetches all selected sources, deduplicates, then enri
 
 One worker enriches and classifies a single publication, preferring cached data and only calling external services when needed.
 
-- [[openalex_sdg.py#_enrich_and_classify_publication]] — enriches abstracts, uses positive OpenAlex Aurora tags, and reuses or calls Aurora for empty or missing lists. It preserves the original OpenAlex response, exports `x_sdgs`, and optionally runs an independent LLM comparison; see [[cache#Canonical publications]] and [[cache#SDG results]].
+- [[openalex_sdg.py#_enrich_and_classify_publication]] — enriches abstracts, uses positive historical OpenAlex Aurora tags, and reuses or calls Aurora for empty or missing lists. It exports current OpenAlex SDGs and optionally runs an independent LLM comparison; see [[cache#Canonical publications]] and [[cache#SDG results]].
 - [[openalex_sdg.py#_work_cache_changed]] — returns true when persistence would add provenance or a longer abstract.
 - [[openalex_sdg.py#_source_record_key_set]] — the set of source-record keys a publication represents, used to detect new provenance.
 
@@ -32,9 +32,9 @@ Abstracts are retrieved in a fixed fallback order: cached, then Semantic Scholar
 
 ## Classification
 
-Positive OpenAlex Aurora tags are primary; an empty list triggers a local Aurora recheck.
+Positive tags from OpenAlex's temporary `sustainable_development_goals_aurora` field are primary; an empty list triggers a local Aurora recheck.
 
-Missing or malformed OpenAlex fields also trigger the Aurora fallback. Both calls use title plus enriched abstract and a 0.4 cutoff. `sdg_source` distinguishes `aurora_recheck_openalex_empty` from `aurora_fallback`; `openalex_aurora_response` retains the original `[]`. Experimental `x_sdgs` and the selected [[llm-classifier|independent LLM comparison]] stay separate.
+Missing or malformed Aurora fields also trigger the local fallback. Both calls use title plus enriched abstract and a 0.4 cutoff. `sdg_source` distinguishes `aurora_recheck_openalex_empty` from `aurora_fallback`; `openalex_aurora_response` retains the original `[]`. Current `sustainable_development_goals` and the selected [[llm-classifier|independent LLM comparison]] stay separate. OpenAlex's Aurora field is scheduled for removal in November 2026; fetching retries without it if the API rejects the select field.
 
 No goal at or above the cutoff produces a successful `no_sdg` result with an empty assignment. This is distinct from `failed`, which means no valid classifier response was obtained. The cutoff is fixed in code and must stay aligned with the chart filter and Aurora cache identity.
 

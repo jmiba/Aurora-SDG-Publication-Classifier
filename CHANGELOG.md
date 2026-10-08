@@ -5,6 +5,17 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.9] - 2026-10-08
+
+### Fixed
+
+- Stop requesting the removed OpenAlex `x_sdgs` field, which made publication fetches fail with HTTP 400.
+- Read historical Aurora tags from `sustainable_development_goals_aurora`, and retry without that temporary field if OpenAlex removes it.
+
+### Changed
+
+- Export the current OpenAlex classifier separately as `openalex_sdgs` and `openalex_sdgs_status`; keep Aurora as the primary classification method.
+
 ## [1.1.8] - 2026-09-26
 
 ### Added
