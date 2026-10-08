@@ -8,6 +8,8 @@ The flow is [[architecture#Query configuration]] -> [[architecture#Fetch executi
 
 The app entry point is [[app.py#main]], which configures the page, resolves secrets and sources, renders the query controls, and branches between "idle", "fetch in progress", and "completed result" states.
 
+[[app.py#APP_NAME]] supplies the neutral Publication SDG Classifier title and browser-tab name. Selector labels explicitly identify retained Aurora behavior as legacy; the default is the released local OpenAlex pipeline. Legacy method/cache identities remain unchanged.
+
 - [[app.py#APP_VERSION]] — version shown in the page caption and used in no other runtime path.
 - [[app.py#QuerySelection]] — frozen dataclass carrying the validated, non-secret identity of one fetch run (sources, institutions, types, model, dates, limit, and the resolved service configuration).
 - [[app.py#build_query_params]] — builds the stable, serializable parameter map stored with a completed result so the UI can detect stale results when controls change ([[app.py#_result_payload_matches_params]]).
@@ -15,6 +17,8 @@ The app entry point is [[app.py#main]], which configures the page, resolves secr
 ## Secrets and configuration
 
 Secrets are loaded once per process from Streamlit secrets, falling back to local TOML files, and are never shown in the UI.
+
+`.streamlit/config.toml` disables source-file watching. Streamlit's module-path introspection triggers Transformers' lazy vision imports and irrelevant missing-torchvision warnings. Restart after code edits; widget reruns and progress polling remain enabled.
 
 - [[app.py#_load_secrets]] — process-level secret cache (Streamlit secrets first, then `.streamlit/secrets.toml`, then `~/.streamlit/secrets.toml`).
 - [[app.py#get_secret_text]] / [[app.py#get_secret_bool]] — dotted-name secret access with placeholder ("none", "null") normalization.

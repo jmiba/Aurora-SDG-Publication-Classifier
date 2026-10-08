@@ -33,6 +33,8 @@ Each fetched source record is stored verbatim (with its raw JSON) and linked to 
 
 Self-run classifications are cached by publication, method identity, and input hash.
 
+The [[openalex-local]] comparison stores all 17 scores under its pinned model/input/scoring identity. Valid below-threshold results are reusable; failures are not cached, and malformed or stale entries are recomputed.
+
 The Aurora fallback and empty-list recheck share a cache identity for their title-plus-abstract input and 0.4 cutoff; export provenance distinguishes them. LLM identities include provider endpoint, model, and prompt. The temporary OpenAlex Aurora field and current OpenAlex SDGs come from the fetched source record.
 
 - [[cache_db.py#upsert_sdg_result]] — persists a classification keyed by (publication key, model) with the input `text_hash`; foreign-keyed to `canonical_works`.

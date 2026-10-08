@@ -1,0 +1,4 @@
+[server]
+# Transformers exposes lazy vision modules that source-watcher introspection
+# imports accidentally. Text inference needs no torchvision. Restart after edits.
+fileWatcherType = "none"

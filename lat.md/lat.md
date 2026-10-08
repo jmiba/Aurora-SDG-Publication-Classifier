@@ -3,7 +3,9 @@ This directory defines the high-level concepts, business logic, and architecture
 - [[architecture]] — Streamlit app shell, secrets, query selection, and the main render/fetch flow.
 - [[sources]] — Publication source adapters: OpenAlex, DSpace, OAI-PMH, HAL; normalization and deduplication.
 - [[enrichment]] — Abstract enrichment and Aurora SDG classification with caching and rate limiting.
-- [[llm-classifier]] — Planned LLM-based SDG classifier as an additional model option (design only, not yet implemented).
+- [[llm-classifier]] — Implemented optional independent hosted LLM comparison, with evidence validation and qualification boundaries.
+- [[openalex-evaluation]] — Released OpenAlex SDG head evaluation, reproduced benchmarks, local inference checks, and integration conditions.
+- [[openalex-local]] — Optional local pipeline comparison, pinned scoring contract, cache provenance, and deployment limits.
 - [[cache]] — SQLite cache schema, canonical publications, provenance, and legacy migration.
 - [[fetch-jobs]] — Background fetch jobs, progress publication, and cancellation.
 - [[exports]] — Result preview, charts, and CSV/XLSX export.

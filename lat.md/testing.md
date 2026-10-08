@@ -11,6 +11,7 @@ Standard commands to run the whole suite or a single module locally.
 - `python -m unittest test_app` — app flow, preview, and fetch-job behavior.
 - `python -m unittest test_request_utils` — retry/backoff policy.
 - `python -m unittest test_dependency_profiles` — dependency profile boundaries (see below).
+- `python -m unittest test_openalex_local_sdg` — local pipeline contract, cache isolation, CSV/XLSX, cancellation, and selector behavior without downloading ML weights.
 - `python3 test_scholarly_freeproxies.py "query" --max-results 3` — manual, network-dependent check of the optional `scholarly` free-proxy path (not part of CI).
 
 ## Coverage map

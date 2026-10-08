@@ -31,6 +31,7 @@ import plotly.graph_objects as go
 import requests
 import streamlit as st
 
+import openalex_local_sdg as local_sdg
 from fetch_jobs import discard_fetch_job, get_fetch_job, start_fetch_job
 from llm_sdg import MODEL_ID, LlmConfig
 from openalex_sdg import (
@@ -86,6 +87,9 @@ PREVIEW_COLUMNS = [
     "llm_status",
     "llm_note",
     "llm_evidence",
+    "local_sdgs",
+    "local_sdg_status",
+    "local_sdg_note",
 ]
 PREVIEW_PAGE_SIZE = 25
 SPHERE_LATITUDE_STEPS = 16
@@ -134,10 +138,16 @@ CSV_FIELDNAMES = [
     "llm_provider_model",
     "llm_prompt_version",
     "source_provenance_json",
+    "local_sdg_response",
+    "local_sdgs",
+    "local_sdg_status",
+    "local_sdg_note",
+    "local_sdg_classifier_version",
 ]
 RESULT_SESSION_KEY = "fetch_result"
-RESULT_SCHEMA_VERSION = 6
+RESULT_SCHEMA_VERSION = 8
 APP_VERSION = "1.1.9"
+APP_NAME = "Publication SDG Classifier"
 APP_REPOSITORY_URL = "https://github.com/jmiba/Aurora-SDG-Publication-Classifier"
 MAX_EXPORT_FILENAME_LENGTH = 150
 SDG_THRESHOLD_PERCENT = 40.0
@@ -497,7 +507,7 @@ def render_sdg_pie_chart(data: List[Tuple[str, str, float]], title: str):
             ),
             tooltip=[
                 alt.Tooltip("SDG", title="Sustainable Development Goal"),
-                alt.Tooltip("Value", format=".1f", title="Share of Aurora scores (%)"),
+                alt.Tooltip("Value", format=".1f", title="Share of primary classifier scores (%)"),
             ],
         )
         .properties(width=1650, height=450, title=title)
@@ -1747,14 +1757,23 @@ def render_publication_type_selector(
 def render_model_selector() -> str:
     """Let the user choose primary SDGs and optional LLM comparison."""
     st.subheader("4. SDG classification", divider="green")
-    default_index = next((i for i, (name, _) in enumerate(AURORA_MODELS) if name == "aurora-sdg-multi"), 0)
+    default_index = next((i for i, (name, _) in enumerate(AURORA_MODELS) if name == "openalex-local"), 0)
     selected_index = st.selectbox(
         "Choose SDG processing",
         options=range(len(AURORA_MODELS)),
         index=default_index,
         format_func=lambda index: AURORA_MODELS[index][1],
     )
-    return AURORA_MODELS[selected_index][0]
+    model = AURORA_MODELS[selected_index][0]
+    if model == "openalex-local":
+        st.caption(
+            "Local OpenAlex classifier: downloads a 1.19 GB embedding model on first use. "
+            "Requires the optional local dependencies and sufficient RAM; standard Community "
+            "Cloud execution is not qualified. Scores do not include evidence quotations."
+        )
+        if not local_sdg.dependencies_available():
+            st.info("Install local comparison support: pip install -r requirements-openalex-local.txt")
+    return model
 
 
 def render_advanced_options(
@@ -1831,6 +1850,7 @@ def build_query_params(selection: QuerySelection) -> Dict[str, Any]:
         "institutions": list(selection.institution_ids),
         "types": list(selection.publication_types),
         "model": selection.model,
+        "local_sdg_version": local_sdg.CACHE_MODEL if selection.model == "openalex-local" else None,
         "llm_version": selection.llm_config.identity if selection.model == "llm-independent" and selection.llm_config else None,
         "from": selection.from_date,
         "to": selection.to_date,
@@ -1841,6 +1861,8 @@ def build_query_params(selection: QuerySelection) -> Dict[str, Any]:
 def query_configuration_errors(selection: QuerySelection) -> List[str]:
     """Return configuration errors that must block a new fetch."""
     errors = []
+    if selection.model == "openalex-local" and not local_sdg.dependencies_available():
+        errors.append("Local OpenAlex comparison requires: pip install -r requirements-openalex-local.txt")
     if selection.include_openalex and not has_contact_user_agent(selection.user_agent):
         errors.append(
             "OpenAlex fetches require `http_user_agent` in `.streamlit/secrets.toml` "
@@ -1855,7 +1877,7 @@ def query_configuration_errors(selection: QuerySelection) -> List[str]:
         endpoint = urlparse(selection.llm_config.base_url)
         if endpoint.scheme != "https" or not endpoint.netloc or endpoint.username or endpoint.password or endpoint.query or endpoint.fragment:
             errors.append("`llm_provider_base_url` must be an HTTPS API base URL without credentials or query parameters.")
-    if selection.model != "skip" and not selection.aurora_base_url:
+    if selection.model in {"aurora-sdg-multi", "llm-independent"} and not selection.aurora_base_url:
         errors.append(
             "SDG classification requires `aurora_base_url` in "
             "`.streamlit/secrets.toml`."
@@ -2381,6 +2403,19 @@ def render_result_charts(
                 "Check `llm_note` in the preview or export for the failure code.",
                 icon=":material/error:",
             )
+    local_counts = {
+        status: sum(row.get("local_sdg_status") == status for row in chart_rows)
+        for status in ("classified", "below_threshold", "failed")
+    }
+    if any(local_counts.values()):
+        st.caption(
+            "Local OpenAlex comparison: "
+            f"{local_counts['classified']} classified, "
+            f"{local_counts['below_threshold']} with no goal above threshold, "
+            f"{local_counts['failed']} failed."
+        )
+        if local_counts["failed"]:
+            st.warning("Local inference failed for some publications. Check local_sdg_note in the preview or export.")
     chart_title = "selected publication" if len(chart_rows) == 1 else "all publications"
     if chart_title == "selected publication" and selected_title:
         chart_title = f"selected publication ({selected_title})"
@@ -2470,16 +2505,15 @@ def render_completed_result(
 
 def main() -> None:
     """Streamlit entry point that wires all widgets, fetch flow, and previews."""
-    st.set_page_config(page_title="Aurora SDG Publication Classifier", layout="wide")
-    st.title("Aurora SDG Publication Classifier")
+    st.set_page_config(page_title=APP_NAME, layout="wide")
+    st.title(APP_NAME)
     st.caption(
         f"Version {APP_VERSION} | [Get help on GitHub]({APP_REPOSITORY_URL})"
     )
     st.caption(
         "Fetch and deduplicate publications from OpenAlex, DSpace, and OAI-PMH "
         "repositories, relate them to the 17 UN Sustainable Development Goals "
-        "(SDGs) using the [Aurora SDG classifier]"
-        "(https://aurora-universities.eu/sdg-research/classify/), and export the results."
+        "(SDGs), compare classification methods, and export the results."
     )
 
     user_agent, _ = resolve_user_agent()

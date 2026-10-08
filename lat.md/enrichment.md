@@ -32,7 +32,7 @@ Abstracts are retrieved in a fixed fallback order: cached, then Semantic Scholar
 
 ## Classification
 
-Positive tags from OpenAlex's temporary `sustainable_development_goals_aurora` field are primary; an empty list triggers a local Aurora recheck.
+The default [[openalex-local]] supplies primary scores after enrichment, without calling Aurora. Explicit legacy modes use available OpenAlex Aurora tags or an API fallback.
 
 Missing or malformed Aurora fields also trigger the local fallback. Both calls use title plus enriched abstract and a 0.4 cutoff. `sdg_source` distinguishes `aurora_recheck_openalex_empty` from `aurora_fallback`; `openalex_aurora_response` retains the original `[]`. Current `sustainable_development_goals` and the selected [[llm-classifier|independent LLM comparison]] stay separate. OpenAlex's Aurora field is scheduled for removal in November 2026; fetching retries without it if the API rejects the select field.
 

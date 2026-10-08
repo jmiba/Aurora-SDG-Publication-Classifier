@@ -20,6 +20,7 @@ from urllib.parse import quote
 
 import requests
 
+import openalex_local_sdg as local_sdg
 from cache_db import (
     get_cached_sdg_result,
     get_cached_work,
@@ -79,9 +80,10 @@ OPENALEX_WORK_TYPES = (
 )
 
 AURORA_MODELS = [
-    ("aurora-sdg-multi", "Aurora SDGs: use available OpenAlex tags, otherwise run locally"),
-    ("llm-independent", "Aurora SDGs + independent LLM comparison"),
-    ("skip", "Skip SDG classification (no Aurora API calls)"),
+    ("aurora-sdg-multi", "Legacy Aurora (available OpenAlex tags or API fallback)"),
+    ("llm-independent", "Independent LLM + legacy Aurora comparison"),
+    ("openalex-local", "OpenAlex pipeline (local, default)"),
+    ("skip", "Skip SDG classification"),
 ]
 
 MIN_WORDS_BY_MODEL: Dict[str, int] = {}
@@ -765,6 +767,7 @@ def _enrich_and_classify_publication(
     aurora_base_url: Optional[str] = None,
     llm_config: Optional[LlmConfig] = None,
     llm_limiter: Optional[_RateLimiter] = None,
+    local_classifier: Optional[local_sdg.LocalClassifier] = None,
 ) -> _PublicationEnrichment:
     """Enrich and classify one publication using the current worker's session."""
 
@@ -847,6 +850,9 @@ def _enrich_and_classify_publication(
     if model == "skip":
         sdg_note = "skipped: user selected 'skip'"
         sdg_source = "skipped"
+    elif model == "openalex-local":
+        # This method supplies primary results below; never route it through Aurora.
+        sdg_source = "openalex_local"
     elif openalex_aurora is not None and openalex_aurora["predictions"]:
         sdg_json = openalex_aurora
         sdg_source = "openalex_aurora"
@@ -949,7 +955,43 @@ def _enrich_and_classify_publication(
                 if not abstract_text:
                     llm_note = _append_sdg_note(llm_note, "low_confidence:title_only_no_abstract")
 
-    sdg_raw = json.dumps(sdg_json, ensure_ascii=False) if sdg_json is not None else ""
+    local_result = None
+    local_status = "not_run"
+    local_note = ""
+    if model == "openalex-local":
+        local_status = "failed"
+        local_hash = local_sdg.input_hash(title, abstract_text)
+        cached_local = get_cached_sdg_result(publication_key, local_sdg.CACHE_MODEL)
+        if cached_local and cached_local.get("text_hash") == local_hash:
+            try:
+                local_result = local_sdg.validate_result(json.loads(cached_local["sdg_response"]))
+                local_note = str(cached_local.get("sdg_note") or "")
+            except (TypeError, ValueError, KeyError):
+                pass
+        if local_result is None:
+            ensure_worker_active()
+            classifier = local_classifier or local_sdg.LocalClassifier()
+            local_result, local_note = classifier.classify(title, abstract_text, ensure_worker_active)
+            ensure_worker_active()
+            if local_result is not None:
+                local_result = local_sdg.validate_result(local_result)
+                if not work_written_for_classification:
+                    publication["abstract"] = abstract_text
+                    upsert_work(publication)
+                    work_written_for_classification = True
+                upsert_sdg_result(
+                    publication_key=publication_key, model=local_sdg.CACHE_MODEL,
+                    sdg_response=local_result, sdg_formatted=local_sdg.format_result(local_result),
+                    sdg_note=local_note, text_hash=local_hash,
+                )
+        if local_result is not None:
+            local_status = local_result["status"]
+        sdg_status = local_status
+        sdg_note = local_note
+        sdg_formatted = local_sdg.format_primary_result(local_result)
+
+    primary_result = local_result if model == "openalex-local" else sdg_json
+    sdg_raw = json.dumps(primary_result, ensure_ascii=False) if primary_result is not None else ""
     llm_raw = json.dumps(llm_decision, ensure_ascii=False) if llm_decision is not None else ""
     openalex_current_status = (
         "classified" if openalex_current and openalex_current["predictions"]
@@ -961,7 +1003,7 @@ def _enrich_and_classify_publication(
     row_data.update(
         {
             "abstract": abstract_text,
-            "sdg_model": "aurora-sdg-multi" if model != "skip" else "skip",
+            "sdg_model": model if model in {"skip", "openalex-local"} else "aurora-sdg-multi",
             "sdg_source": sdg_source,
             "sdg_response": sdg_raw,
             "sdg_formatted": sdg_formatted,
@@ -969,7 +1011,8 @@ def _enrich_and_classify_publication(
             "sdg_status": sdg_status,
             "sdg_evidence": "",
             "sdg_classifier_version": (
-                "openalex:sustainable_development_goals_aurora" if sdg_source == "openalex_aurora"
+                local_sdg.CACHE_MODEL if model == "openalex-local"
+                else "openalex:sustainable_development_goals_aurora" if sdg_source == "openalex_aurora"
                 else AURORA_FALLBACK_CACHE_MODEL if sdg_source in {
                     "aurora_fallback", "aurora_recheck_openalex_empty"
                 } else ""
@@ -989,6 +1032,11 @@ def _enrich_and_classify_publication(
             "llm_classifier_version": llm_config.cache_model if model == "llm-independent" and llm_config else "",
             "llm_provider_model": llm_config.model if model == "llm-independent" and llm_config else "",
             "llm_prompt_version": PROMPT_VERSION if model == "llm-independent" else "",
+            "local_sdg_response": json.dumps(local_result, ensure_ascii=False) if local_result is not None else "",
+            "local_sdgs": local_sdg.format_result(local_result),
+            "local_sdg_status": local_status,
+            "local_sdg_note": local_note,
+            "local_sdg_classifier_version": local_sdg.CACHE_MODEL if model == "openalex-local" else "",
         }
     )
     publication_for_cache = dict(row_data)
@@ -1153,6 +1201,7 @@ def fetch_publications_with_sdg(
             cancel_event = threading.Event()
             aurora_limiter = _AURORA_RATE_LIMITER
             llm_limiter = _RateLimiter(0.5)
+            local_classifier = local_sdg.LocalClassifier() if model == "openalex-local" else None
             semantic_scholar_state = _SemanticScholarRunState()
             worker_local = threading.local()
             worker_sessions: List[requests.Session] = []
@@ -1168,7 +1217,7 @@ def fetch_publications_with_sdg(
                 return worker_session_value
 
             executor = ThreadPoolExecutor(
-                max_workers=min(2 if model == "llm-independent" else ENRICHMENT_MAX_WORKERS, len(publications)),
+                max_workers=min(2 if model in {"llm-independent", "openalex-local"} else ENRICHMENT_MAX_WORKERS, len(publications)),
                 thread_name_prefix="publication-enrichment",
             )
             pending = set()
@@ -1191,6 +1240,7 @@ def fetch_publications_with_sdg(
                         aurora_base_url=aurora_base_url,
                         llm_config=llm_config,
                         llm_limiter=llm_limiter,
+                        local_classifier=local_classifier,
                     )
                     future_to_index[future] = index
                 pending = set(future_to_index)

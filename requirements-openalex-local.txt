@@ -1,0 +1,5 @@
+# Optional local OpenAlex comparison; install alongside requirements.txt.
+torch==2.14.1
+sentence-transformers==6.1.0
+transformers==5.19.0
+numpy>=2.0,<3
