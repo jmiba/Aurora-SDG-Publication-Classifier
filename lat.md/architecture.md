@@ -14,6 +14,8 @@ The app entry point is [[app.py#main]], which configures the page, resolves secr
 - [[app.py#QuerySelection]] — frozen dataclass carrying the validated, non-secret identity of one fetch run (sources, institutions, types, model, dates, limit, and the resolved service configuration).
 - [[app.py#build_query_params]] — builds the stable, serializable parameter map stored with a completed result so the UI can detect stale results when controls change ([[app.py#_result_payload_matches_params]]).
 
+Version 2.0.0 promotes the local OpenAlex method to the default. This changes primary export response shape and empty-result status; migration and release notes are maintained in `CHANGELOG.md`. SQLite data is preserved, while schema version 8 invalidates earlier session results.
+
 ## Secrets and configuration
 
 Secrets are loaded once per process from Streamlit secrets, falling back to local TOML files, and are never shown in the UI.

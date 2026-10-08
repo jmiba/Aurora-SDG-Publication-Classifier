@@ -80,9 +80,9 @@ OPENALEX_WORK_TYPES = (
 )
 
 AURORA_MODELS = [
+    ("openalex-local", "OpenAlex pipeline (local, default)"),
     ("aurora-sdg-multi", "Legacy Aurora (available OpenAlex tags or API fallback)"),
     ("llm-independent", "Independent LLM + legacy Aurora comparison"),
-    ("openalex-local", "OpenAlex pipeline (local, default)"),
     ("skip", "Skip SDG classification"),
 ]
 

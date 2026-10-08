@@ -5,6 +5,32 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-10-08
+
+### Changed
+
+- Rename the app and browser title to **Publication SDG Classifier**.
+- Make the released local OpenAlex embedding/head pipeline the default primary classifier. Its results drive previews, charts, and exports, without an Aurora API fallback or Aurora URL requirement.
+- Keep legacy Aurora and the independent hosted LLM comparison as explicit alternatives.
+- Use `below_threshold` for valid empty local results and `failed` for unsuccessful inference. Default primary `sdg_response` now contains all 17 scores and model provenance, rather than the Aurora prediction envelope.
+- Invalidate previous session results through result schema version 8; preserve existing SQLite publications and reusable classifier cache entries.
+
+### Added
+
+- Optional local inference dependencies in `requirements-openalex-local.txt`, a pinned Qwen3-Embedding-0.6B revision, and the released v2 head with checksum and upstream licence notices.
+- Separate `local_*` output fields, validated cache reuse, serialized shared CPU inference, and explicit title-only, truncation, and missing-venue notes.
+- Released-pipeline benchmark reproduction and documented local inference checks; model quality on reviewed ERUA examples remains unqualified.
+
+### Fixed
+
+- Disable source-file watching to prevent Streamlit from triggering unrelated Transformers vision imports and missing-`torchvision` warnings. Restart the app after code edits; widget reruns and progress polling remain available.
+
+### Migration
+
+- Install base requirements and `requirements-openalex-local.txt` to run the new default. The first run downloads approximately 1.19 GB of model weights; float32 weights occupy approximately 2.38 GB before runtime overhead.
+- Standard Streamlit Community Cloud execution of the local pipeline is not qualified. Deployments without local ML dependencies must explicitly select a legacy mode or skip classification.
+- Consumers of primary `sdg_response`, `sdg_status`, and `sdg_source` must handle the local score/provenance envelope, `below_threshold`, and `openalex_local`. This is the breaking change behind version 2.0.0.
+
 ## [1.1.9] - 2026-10-08
 
 ### Fixed
@@ -217,7 +243,9 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   tracked source tree.
 - Required a non-placeholder contact address before OpenAlex queries can run.
 
-[Unreleased]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/1.1.8...HEAD
+[Unreleased]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/2.0.0...HEAD
+[2.0.0]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/0.1.9...2.0.0
+[1.1.9]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/releases/tag/0.1.9
 [1.1.8]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/1.1.7...1.1.8
 [1.1.7]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/1.1.6...1.1.7
 [1.1.6]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/1.1.5...1.1.6

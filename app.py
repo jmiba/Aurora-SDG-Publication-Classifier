@@ -146,7 +146,7 @@ CSV_FIELDNAMES = [
 ]
 RESULT_SESSION_KEY = "fetch_result"
 RESULT_SCHEMA_VERSION = 8
-APP_VERSION = "1.1.9"
+APP_VERSION = "2.0.0"
 APP_NAME = "Publication SDG Classifier"
 APP_REPOSITORY_URL = "https://github.com/jmiba/Aurora-SDG-Publication-Classifier"
 MAX_EXPORT_FILENAME_LENGTH = 150
@@ -2409,7 +2409,7 @@ def render_result_charts(
     }
     if any(local_counts.values()):
         st.caption(
-            "Local OpenAlex comparison: "
+            "Local OpenAlex results: "
             f"{local_counts['classified']} classified, "
             f"{local_counts['below_threshold']} with no goal above threshold, "
             f"{local_counts['failed']} failed."

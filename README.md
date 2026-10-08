@@ -79,9 +79,9 @@ graph TD
 5. **Abstract enrichment**: DSpace abstracts are read from both `dc.abstract*` and standard `dc.description.abstract*` metadata; OAI-PMH abstracts come from `dc:description`, preferring an English description when one is present. The richer of current source text and cached text is reused before external fallbacks:
     - **Semantic Scholar**: Called via its official API using the paper's DOI. Requires an optional API key. If the API rejects configured credentials with HTTP 401 or 403, the app disables Semantic Scholar for the rest of that fetch, continues with other configured fallbacks, and shows a warning without exposing the key.
     - **Google Scholar**: Uses [SerpApi](https://serpapi.com/) when a key is provided; otherwise falls back to `scholarly` with free proxies (less reliable).
-6. **Exports**: CSV and XLSX include canonical IDs, source-qualified record IDs, source URLs, source counts and provenance. Primary `sdg_*` fields include `sdg_source`: `openalex_aurora` for positive historical Aurora tags from OpenAlex, `aurora_recheck_openalex_empty` for an empty-list recheck, or `aurora_fallback` when those tags are unavailable. `openalex_aurora_response` and `openalex_aurora_status` retain the original Aurora field, including `[]` with status `empty`. `openalex_sdgs` and `openalex_sdgs_status` hold the current OpenAlex classifier's comparison result and distinguish an empty list from an unavailable field. `llm_*` fields hold the optional independent comparison; `llm_status=not_run` means it was not selected. The retired `x_sdgs` field is no longer requested or exported.
+6. **Exports**: CSV and XLSX include canonical IDs, source-qualified record IDs, source URLs, source counts and provenance. Primary `sdg_*` fields use `sdg_source=openalex_local` by default, with all 17 local scores and provenance in `sdg_response`. Explicit legacy modes instead use `sdg_source`: `openalex_aurora` for positive historical Aurora tags from OpenAlex, `aurora_recheck_openalex_empty` for an empty-list recheck, or `aurora_fallback` when those tags are unavailable. `openalex_aurora_response` and `openalex_aurora_status` retain the original Aurora field, including `[]` with status `empty`. `openalex_sdgs` and `openalex_sdgs_status` hold the current OpenAlex classifier's comparison result and distinguish an empty list from an unavailable field. `llm_*` fields hold the optional independent comparison; `llm_status=not_run` means it was not selected. The retired `x_sdgs` field is no longer requested or exported.
 
-## Released OpenAlex pipeline comparison
+## Released OpenAlex pipeline
 
 The default **OpenAlex pipeline (local, default)** runs
 the released Jev-trained embedding/head pipeline on the same enriched records.
@@ -91,11 +91,11 @@ Install its optional dependencies first, alongside the base requirements:
 pip install -r requirements-openalex-local.txt
 ```
 
-The first comparison run downloads Qwen/Qwen3-Embedding-0.6B (about 1.19 GB).
+The first local classification run downloads Qwen/Qwen3-Embedding-0.6B (about 1.19 GB).
 The app pins its revision and the released v2 head, uses float32 CPU inference,
 and shares one model with serialized inference. Allow several GB of RAM above
 the roughly 2.38 GB of model weights. Standard Streamlit Community Cloud
-execution has not been qualified; base Cloud deployments need no ML dependencies.
+execution has not been qualified. Deployments without ML dependencies must explicitly select a legacy mode or skip classification.
 
 The local classifier sends no publication text to an inference provider. It
 uses title and enriched abstract, retains the first 2,000 characters, and omits
