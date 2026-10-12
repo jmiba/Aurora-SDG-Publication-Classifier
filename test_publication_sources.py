@@ -1232,6 +1232,34 @@ class PublicationSourceTests(unittest.TestCase):
         self.assertEqual(end_of_month(date(2025, 2, 1)), date(2025, 2, 28))
 
 
+class OpenAlexSdgIdentifierTests(unittest.TestCase):
+    # @lat: [[testing#OpenAlex SDG identifier compatibility]]
+    def test_current_and_legacy_identifiers_preserve_assignments(self) -> None:
+        for prefix in ("https://metadata.un.org/sdg/", "https://openalex.org/sdgs/"):
+            with self.subTest(prefix=prefix):
+                result = openalex_sdg.openalex_sdg_predictions([
+                    {"id": prefix + "4", "display_name": "Quality education", "score": 0.9756},
+                    {"id": prefix + "10", "display_name": "Reduced inequalities", "score": 0.4},
+                    {"id": prefix + "16", "display_name": "Peace and justice", "score": 0.39},
+                ])
+                self.assertEqual(result, {"predictions": [
+                    {"prediction": 0.9756, "sdg": {"code": "4", "name": "Quality education"}},
+                    {"prediction": 0.4, "sdg": {"code": "10", "name": "Reduced inequalities"}},
+                ]})
+
+    def test_empty_and_unavailable_metadata_remain_distinct(self) -> None:
+        self.assertEqual(openalex_sdg.openalex_sdg_predictions([]), {"predictions": []})
+        self.assertIsNone(openalex_sdg.openalex_sdg_predictions(None))
+
+    def test_invalid_goals_and_scores_remain_unavailable(self) -> None:
+        for goal, score in (("0", 0.8), ("18", 0.8), ("4", float("nan")),
+                            ("4", 1.1), ("4", "invalid"), ("invalid", 0.8)):
+            with self.subTest(goal=goal, score=score):
+                self.assertIsNone(openalex_sdg.openalex_sdg_predictions([
+                    {"id": "https://metadata.un.org/sdg/" + goal, "score": score},
+                ]))
+
+
 class CacheMigrationTests(unittest.TestCase):
     def setUp(self) -> None:
         cache_db.close_connection()
@@ -1263,7 +1291,7 @@ class CacheMigrationTests(unittest.TestCase):
             "id": "https://openalex.org/W-SDG", "title": "Shared work",
             "doi": "10.1234/shared-sdg", "authorships": [],
             "sustainable_development_goals_aurora": [],
-            "sustainable_development_goals": [{"id": "https://openalex.org/sdgs/7", "display_name": "Clean energy", "score": 0.6}],
+            "sustainable_development_goals": [{"id": "https://metadata.un.org/sdg/7", "display_name": "Clean energy", "score": 0.6}],
         })
         merged = deduplicate_publications([repository, openalex])[0]
         self.assertEqual(merged["_openalex_aurora_sdgs"], [])
@@ -1290,6 +1318,7 @@ class CacheMigrationTests(unittest.TestCase):
         self.assertEqual(result.row["openalex_aurora_response"], "[]")
         self.assertEqual(result.row["openalex_aurora_status"], "empty")
         self.assertEqual(result.row["openalex_sdgs"], "60% SDG 7 (Clean energy)")
+        self.assertEqual(result.row["openalex_sdgs_status"], "classified")
 
     def test_empty_openalex_recheck_reuses_cached_aurora_result(self) -> None:
         publication = {

@@ -38,7 +38,7 @@ Missing or malformed Aurora fields also trigger the local fallback. Both calls u
 
 No goal at or above the cutoff produces a successful `no_sdg` result with an empty assignment. This is distinct from `failed`, which means no valid classifier response was obtained. The cutoff is fixed in code and must stay aligned with the chart filter and Aurora cache identity.
 
-- [[openalex_sdg.py#openalex_sdg_predictions]] — validates and converts OpenAlex SDG arrays into the presentation envelope; keeps an empty array distinct from a missing field.
+- [[openalex_sdg.py#openalex_sdg_predictions]] — accepts current `https://metadata.un.org/sdg/N` and legacy `https://openalex.org/sdgs/N` identifiers, validates scores and goal numbers, and converts SDG arrays into the presentation envelope. Empty arrays remain distinct from missing or malformed fields; see [[testing#OpenAlex SDG identifier compatibility]].
 - [[openalex_sdg.py#select_aurora_predictions]] — validates self-run Aurora scores and keeps those at or above 0.4.
 - [[openalex_sdg.py#classify_text_aurora]] — POSTs the text to the Aurora endpoint for a model, returning `(json, note)`.
 - [[llm_sdg.py#classify_publication]] — sends title and abstract to a configured hosted model with structured output, validates evidence excerpts, and returns a decision or a fixed failure category.

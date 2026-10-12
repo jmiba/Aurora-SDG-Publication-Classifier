@@ -81,6 +81,8 @@ graph TD
     - **Google Scholar**: Uses [SerpApi](https://serpapi.com/) when a key is provided; otherwise falls back to `scholarly` with free proxies (less reliable).
 6. **Exports**: CSV and XLSX include canonical IDs, source-qualified record IDs, source URLs, source counts and provenance. Primary `sdg_*` fields use `sdg_source=openalex_local` by default, with all 17 local scores and provenance in `sdg_response`. Explicit legacy modes instead use `sdg_source`: `openalex_aurora` for positive historical Aurora tags from OpenAlex, `aurora_recheck_openalex_empty` for an empty-list recheck, or `aurora_fallback` when those tags are unavailable. `openalex_aurora_response` and `openalex_aurora_status` retain the original Aurora field, including `[]` with status `empty`. `openalex_sdgs` and `openalex_sdgs_status` hold the current OpenAlex classifier's comparison result and distinguish an empty list from an unavailable field. `llm_*` fields hold the optional independent comparison; `llm_status=not_run` means it was not selected. The retired `x_sdgs` field is no longer requested or exported.
 
+OpenAlex SDG metadata accepts both current UN identifiers (`https://metadata.un.org/sdg/N`) and legacy OpenAlex identifiers (`https://openalex.org/sdgs/N`). Valid assignments populate `openalex_sdgs` with status `classified`; an empty list yields `no_sdg`, while missing or malformed metadata yields `unavailable`.
+
 ## Released OpenAlex pipeline
 
 The default **OpenAlex pipeline (local, default)** runs

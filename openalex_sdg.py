@@ -680,7 +680,8 @@ def openalex_sdg_predictions(value: Any) -> Optional[Dict[str, Any]]:
     for item in value:
         if not isinstance(item, Mapping):
             return None
-        match = re.search(r"(?:^|/)sdgs/(\d{1,2})$", str(item.get("id") or ""))
+        # Current API tags use metadata.un.org/sdg/N; older tags use /sdgs/N.
+        match = re.search(r"(?:^|/)sdgs?/(\d{1,2})$", str(item.get("id") or ""))
         try:
             score = float(str(item.get("score")))
         except (TypeError, ValueError):

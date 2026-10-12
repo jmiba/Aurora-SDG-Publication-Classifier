@@ -22,3 +22,9 @@ Standard commands to run the whole suite or a single module locally.
 - `test_dependency_profiles.py` — asserts the base profile excludes the optional scholarly stack and that importing [[openalex_sdg.py]] never imports `scholarly` eagerly (the fallback is lazy by design).
 
 Verification conventions for this repo are also listed in `AGENTS.md`.
+
+## OpenAlex SDG identifier compatibility
+
+Current UN metadata identifiers and legacy OpenAlex identifiers retain valid assignments, while malformed data stays unavailable and empty arrays remain successful empty results.
+
+[[test_publication_sources.py#OpenAlexSdgIdentifierTests]] verifies both identifier formats, the 0.4 cutoff, invalid goals and scores, and empty versus absent metadata. The source merge and enrichment test also verifies current identifiers populate `openalex_sdgs` with status `classified`.

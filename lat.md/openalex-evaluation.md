@@ -78,7 +78,7 @@ Thirty-two cached publications completed offline embedding and head inference. T
 
 The cache was opened read-only. At inspection it held 7,543 canonical rows, including 7,542 with a title and 5,436 with an abstract. From title-bearing records, the sample contained eight per English (`en`/`eng`) versus other/unknown language and abstract versus title-only group, using seed 1300. Venue was omitted because it is absent from the canonical schema. Synthetic numeric IDs were used only to satisfy the upstream CLI; they are not OpenAlex identifiers.
 
-All 32 records produced finite scores in [0,1]. Fourteen received at least one goal, eighteen received none, and sixteen goal assignments were made. No sample text exceeded the released 2,000-character input limit. Explicit float32 embedding took 2.188 seconds, excluding model load and imports. The default CLI took 4.546 seconds including imports and cached model loading.
+All 32 records produced finite scores in \[0,1]. Fourteen received at least one goal, eighteen received none, and sixteen goal assignments were made. No sample text exceeded the released 2,000-character input limit. Explicit float32 embedding took 2.188 seconds, excluding model load and imports. The default CLI took 4.546 seconds including imports and cached model loading.
 
 No reviewed gold labels were available in the inspected tracked project files. These counts therefore say nothing about precision, recall, evidence quality, or whether empty outputs are correct. No project publication text was sent to Jev, Qwen chat, Aurora, or another inference provider. Project text and vectors remain only in the temporary evaluation directory; the saved numerical artifact contains no project titles, abstracts, or canonical record keys.
 
