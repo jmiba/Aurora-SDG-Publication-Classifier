@@ -31,6 +31,16 @@ Each adapter paginates its native API, applies local type/date filtering where t
 - [[publication_sources.py#fetch_oai_records]] — OAI-PMH `ListRecords` with resumption-token paging and a local publication-date filter; XML is parsed safely via [[publication_sources.py#_request_xml]] (size cap and DOCTYPE/ENTITY guard). The first page request sends the selected period start as the OAI-PMH `from` parameter to prune unchanged old records server-side (per-source `send_from` opt-out); `until` is never sent because datestamps, not `dc:date`, are filtered, so the local date filter remains authoritative.
 - [[publication_sources.py#fetch_hal_records]] — HAL Search API paging with Solr date-range filtering.
 
+## OpenAlex authentication
+
+OpenAlex requires a valid API key for cursor paging beyond the first page. The app requires a key before starting OpenAlex runs so a multi-source fetch cannot fail halfway through anonymous paging.
+
+[[app.py#resolve_openalex_api_key]] reads `openalex_api_key` from secrets, falling back to `OPENALEX_API_KEY` in the environment. Blank values and the sample placeholder are treated as missing. Restart after changing credentials because secrets are cached per process.
+
+[[app.py#execute_publication_fetch]] passes the key through [[openalex_sdg.py#fetch_publications_with_sdg]] to [[publication_sources.py#fetch_openalex_records]]. Every page uses an Authorization bearer header and the supported 100-record page size. Institution search and lineage lookups also receive the key. Repository and enrichment requests do not receive it; the key is excluded from result parameters, exports, and the `QuerySelection` representation.
+
+[[app.py#fetch_terminal_notice]] turns OpenAlex HTTP 401/403 failures into configuration guidance without displaying the raw failing URL or response. Repository-only runs remain available without an OpenAlex key. The sample configuration and README describe obtaining a free key and verifying its email.
+
 ## Deduplication
 
 Cross-source duplicates are merged by DOI first, then by a stable title/year/first-author hash, preserving provenance from every source.

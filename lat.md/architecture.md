@@ -11,7 +11,7 @@ The app entry point is [[app.py#main]], which configures the page, resolves secr
 [[app.py#APP_NAME]] supplies the neutral Publication SDG Classifier title and browser-tab name. Selector labels explicitly identify retained Aurora behavior as legacy; the default is the released local OpenAlex pipeline. Legacy method/cache identities remain unchanged.
 
 - [[app.py#APP_VERSION]] — version shown in the page caption and used in no other runtime path.
-- [[app.py#QuerySelection]] — frozen dataclass carrying the validated, non-secret identity of one fetch run (sources, institutions, types, model, dates, limit, and the resolved service configuration).
+- [[app.py#QuerySelection]] — frozen dataclass carrying query controls and resolved service credentials for one fetch run; only the non-secret identity produced by `build_query_params` is stored in completed results.
 - [[app.py#build_query_params]] — builds the stable, serializable parameter map stored with a completed result so the UI can detect stale results when controls change ([[app.py#_result_payload_matches_params]]).
 
 Version 2.0.0 promotes the local OpenAlex method to the default. This changes primary export response shape and empty-result status; migration and release notes are maintained in `CHANGELOG.md`. SQLite data is preserved, while schema version 8 invalidates earlier session results.
@@ -25,6 +25,7 @@ Secrets are loaded once per process from Streamlit secrets, falling back to loca
 - [[app.py#_load_secrets]] — process-level secret cache (Streamlit secrets first, then `.streamlit/secrets.toml`, then `~/.streamlit/secrets.toml`).
 - [[app.py#get_secret_text]] / [[app.py#get_secret_bool]] — dotted-name secret access with placeholder ("none", "null") normalization.
 - [[app.py#resolve_user_agent]] — the OpenAlex contact User-Agent; [[app.py#has_contact_user_agent]] validates that it carries a real `mailto:` contact before any OpenAlex fetch is allowed.
+- [[app.py#resolve_openalex_api_key]] — the key required for OpenAlex cursor paging, from secrets or the deployment environment; see [[sources#OpenAlex authentication]].
 - [[app.py#resolve_aurora_base_url]], [[app.py#resolve_semantic_scholar_key]], [[app.py#resolve_serpapi_key]], [[app.py#resolve_google_scholar_enabled]] — service configuration resolvers.
 - [[app.py#resolve_dspace_sources]] and [[app.py#resolve_oai_sources]] — merge the tracked registries (`dspace_sources.toml`, `oai_sources.toml`) with optional secrets-based additions/overrides; tracked entries are validated by [[sources#Source configuration parsing]].
 

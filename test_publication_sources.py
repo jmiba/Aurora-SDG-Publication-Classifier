@@ -137,6 +137,79 @@ class FakeSession:
         return FakeResponse(self.payloads.pop(0))
 
 
+# @lat: [[testing#OpenAlex authenticated requests]]
+class OpenAlexAuthenticationTests(unittest.TestCase):
+    def test_key_sent_on_every_cursor_page_without_changing_filters(self) -> None:
+        session = FakeSession([
+            {"meta": {"count": 2, "next_cursor": "opaque-cursor"}, "results": [
+                {"id": "https://openalex.org/W1", "title": "First"},
+            ]},
+            {"meta": {"count": 2, "next_cursor": None}, "results": [
+                {"id": "https://openalex.org/W2", "title": "Second"},
+            ]},
+        ])
+        with patch("publication_sources.time.sleep"):
+            records, count = fetch_openalex_records(
+                session, filter_value="institutions.id:I36685595", work_type="article",
+                user_agent="test", openalex_api_key="test-key",
+            )
+        self.assertEqual(len(records), 2)
+        self.assertEqual(count, 2)
+        self.assertEqual([call["params"]["cursor"] for call in session.calls], ["*", "opaque-cursor"])
+        for call in session.calls:
+            self.assertEqual(call["headers"]["Authorization"], "Bearer test-key")
+            self.assertEqual(call["params"]["per-page"], 100)
+            self.assertEqual(call["params"]["filter"], "institutions.id:I36685595")
+            self.assertNotIn("test-key", repr(call["params"]))
+            self.assertNotIn("test-key", call["url"])
+
+    def test_authentication_failure_does_not_retry_or_return_partial_results(self) -> None:
+        response = requests.Response()
+        response.status_code = 401
+        response.url = "https://api.openalex.org/works"
+        session = Mock()
+        session.get.side_effect = [
+            FakeResponse({"meta": {"count": 2, "next_cursor": "next"}, "results": [
+                {"id": "https://openalex.org/W1", "title": "First"},
+            ]}),
+            response,
+        ]
+        with patch("publication_sources.time.sleep"), self.assertRaises(requests.HTTPError):
+            fetch_openalex_records(
+                session, filter_value="institutions.id:I1", work_type="article",
+                user_agent="test", openalex_api_key="invalid-key",
+            )
+        self.assertEqual(session.get.call_count, 2)
+
+    def test_institution_search_and_lineage_use_bearer_header(self) -> None:
+        with patch.object(openalex_sdg.requests, "get") as get:
+            get.return_value.status_code = 200
+            get.return_value.json.return_value = {"results": [], "lineage": ["https://openalex.org/I1"]}
+            openalex_sdg.search_institutions_by_name("SWPS", openalex_api_key="test-key")
+            lineage = openalex_sdg.fetch_institution_lineage("I1", openalex_api_key="test-key")
+        self.assertEqual(lineage, ["I1"])
+        self.assertEqual(get.call_count, 2)
+        for call in get.call_args_list:
+            self.assertEqual(call.kwargs["headers"]["Authorization"], "Bearer test-key")
+            self.assertNotIn("test-key", repr(call.kwargs.get("params")))
+
+    def test_pipeline_passes_key_only_to_openalex(self) -> None:
+        source = DSpaceSource(id="example", label="Example", base_url="https://repo.example/server/api")
+        with (
+            patch.object(openalex_sdg, "fetch_openalex_records", return_value=([], 0)) as openalex,
+            patch.object(openalex_sdg, "fetch_dspace_records", return_value=([], 0)) as dspace,
+        ):
+            rows, _ = openalex_sdg.fetch_publications_with_sdg(
+                include_openalex=True, dspace_sources=[source], institution_id="I36685595",
+                from_date="2023-01-01", work_type="article", model="skip",
+                openalex_api_key="test-key",
+            )
+        self.assertEqual(rows, [])
+        self.assertEqual(openalex.call_args.kwargs["openalex_api_key"], "test-key")
+        self.assertNotIn("openalex_api_key", dspace.call_args.kwargs)
+        self.assertNotIn("Authorization", dspace.call_args.args[0].headers)
+
+
 class PublicationSourceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.source = DSpaceSource(

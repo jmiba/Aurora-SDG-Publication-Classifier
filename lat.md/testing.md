@@ -28,3 +28,15 @@ Verification conventions for this repo are also listed in `AGENTS.md`.
 Current UN metadata identifiers and legacy OpenAlex identifiers retain valid assignments, while malformed data stays unavailable and empty arrays remain successful empty results.
 
 [[test_publication_sources.py#OpenAlexSdgIdentifierTests]] verifies both identifier formats, the 0.4 cutoff, invalid goals and scores, and empty versus absent metadata. The source merge and enrichment test also verifies current identifiers populate `openalex_sdgs` with status `classified`.
+
+## OpenAlex authenticated requests
+
+Authenticated pagination keeps the bearer key on every page and out of query URLs, preserves filters, uses the supported page size, and fails on HTTP 401 rather than returning a partial result.
+
+[[test_publication_sources.py#OpenAlexAuthenticationTests]] also covers institution lookup headers and key forwarding through the pipeline without sending OpenAlex credentials to repository requests.
+
+## OpenAlex authentication configuration
+
+Configuration resolves secrets before the environment, requires a key only for OpenAlex runs, hides the key from result identities, and gives useful authentication guidance before or after a request fails.
+
+[[test_app.py#OpenAlexConfigurationTests]] covers key resolution, worker and lineage forwarding, host-scoped HTTP 401/403 notices, and the SWPS source selection showing the missing-key error with the fetch button disabled.

@@ -213,11 +213,14 @@ def _normalize_institution_id(value: str) -> str:
     return value.strip()
 
 def search_institutions_by_name(
-    name: str, user_agent: str = DEFAULT_USER_AGENT, limit: int = 10
+    name: str, user_agent: str = DEFAULT_USER_AGENT, limit: int = 10,
+    openalex_api_key: Optional[str] = None,
 ) -> List[dict]:
     """Query the OpenAlex institutions endpoint using the user's keyword."""
     params: Dict[str, Any] = {"search": name, "per-page": limit}
     headers = {"User-Agent": user_agent}
+    if openalex_api_key:
+        headers["Authorization"] = f"Bearer {openalex_api_key}"
     response = requests.get(BASE_INSTITUTIONS, params=params, headers=headers, timeout=30)
     response.raise_for_status()
     return response.json().get("results", [])
@@ -227,11 +230,14 @@ def fetch_institution_lineage(
     user_agent: str = DEFAULT_USER_AGENT,
     retries: int = 2,
     pause: float = 0.4,
+    openalex_api_key: Optional[str] = None,
 ) -> List[str]:
     """Fetch the institution record to read its lineage IDs."""
     inst_token = _normalize_institution_id(institution_id)
     url = f"{BASE_INSTITUTIONS}/{inst_token}"
     headers = {"User-Agent": user_agent}
+    if openalex_api_key:
+        headers["Authorization"] = f"Bearer {openalex_api_key}"
     try:
         resp = request_with_backoff(
             requests,
@@ -1068,6 +1074,7 @@ def fetch_publications_with_sdg(
     extra_institution_ids: Optional[Sequence[str]] = None,
     progress_callback: ProgressHook = None,
     cancel_check: Optional[Callable[[], bool]] = None,
+    openalex_api_key: Optional[str] = None,
 ) -> Tuple[List[Dict[str, object]], FetchStats]:
     """Fetch selected sources, deduplicate, then enrich and classify once per work."""
     end_date = to_date or from_date
@@ -1132,6 +1139,7 @@ def fetch_publications_with_sdg(
                             filter_value=openalex_filter,
                             work_type=openalex_types or None,
                             user_agent=user_agent,
+                            openalex_api_key=openalex_api_key,
                             limit_rows=limit_rows,
                             progress_callback=source_progress,
                             cancel_check=cancel_check,

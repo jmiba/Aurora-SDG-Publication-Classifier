@@ -283,6 +283,10 @@ The app relies on Streamlit’s secrets mechanism for API keys and optional untr
 # Replace the reserved address below with a real contact email before using OpenAlex.
 http_user_agent = "Aurora-SDG-Publication-Classifier/1.0 (mailto:replace-me@your-institution.invalid)"
 
+# Required when OpenAlex is selected (or set OPENALEX_API_KEY in the environment).
+# Get a free key at https://openalex.org/settings/api-key and verify your email.
+# openalex_api_key = "YOUR_OPENALEX_API_KEY"
+
 # Base URL for the Aurora fallback, required when SDG classification is enabled.
 aurora_base_url = "https://aurora-sdg.labs.vu.nl/classifier/classify"
 
@@ -307,6 +311,7 @@ serpapi_api_key = "YOUR_SERPAPI_API_KEY"
 default_from_date = "2020-01-01"
 ```
 - `http_user_agent` is required for OpenAlex and must contain a non-placeholder contact email in `mailto:` form; OpenAlex runs are disabled otherwise.
+- `openalex_api_key` is required when OpenAlex is selected. OpenAlex now returns HTTP 401 when following a cursor past the first page without a key, including when OpenAlex is queried alongside SWPS SHARE. Get a free key in [OpenAlex settings](https://openalex.org/settings/api-key) and verify your email. The app reads this secret first, then `OPENALEX_API_KEY` from the environment, and sends it in an Authorization header only to OpenAlex. Requests use the supported 100-record page size. Repository-only runs need no OpenAlex key. Restart the app after changing credentials; secrets are cached for the process lifetime. See [OpenAlex paging requirements](https://help.openalex.org/api/paging/).
 - `aurora_base_url` is required only for legacy Aurora and hosted LLM comparison modes. The default OpenAlex pipeline needs the optional local ML dependencies instead. The optional independent LLM comparison uses `llm_provider_base_url` and `llm_provider_api_key`; its default model is `Qwen/Qwen3.8-27B` unless `llm_provider_model` is set. The endpoint must support OpenAI-compatible chat completions with JSON-schema structured output. Publication titles and abstracts are sent to that provider only when the comparison is selected.
 - The Aurora cutoff is currently fixed at 0.4 in the application, not configurable in `secrets.toml` or another settings file. If OpenAlex changes its cutoff, update the local cutoff, chart threshold, and Aurora cache identity together. Changing the local cutoff cannot recover scores that OpenAlex has already omitted from its response.
 - For Qwen3.8, requests disable extended thinking by default to reduce per-publication latency. Set `llm_provider_enable_thinking = true` to restore it. Other models keep their provider default unless this setting is explicit. Changing the effective mode creates a separate cache identity, so the first run in the new mode classifies rows again. Existing cache entries are preserved.

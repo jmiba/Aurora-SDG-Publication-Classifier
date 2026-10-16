@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import io
+import os
 import threading
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+import requests
 from openpyxl import load_workbook
 from streamlit.testing.v1 import AppTest
 
@@ -33,6 +35,7 @@ def make_selection(**overrides):
         "to_date": "2024-12-31",
         "limit_rows": 10,
         "user_agent": "Classifier (mailto:researcher@university.edu)",
+        "openalex_api_key": "test-openalex-key",
         "semantic_scholar_api_key": None,
         "google_scholar_enabled": False,
         "serpapi_api_key": None,
@@ -40,6 +43,81 @@ def make_selection(**overrides):
     }
     values.update(overrides)
     return app_module.QuerySelection(**values)
+
+
+# @lat: [[testing#OpenAlex authentication configuration]]
+class OpenAlexConfigurationTests(unittest.TestCase):
+    def test_key_resolution_precedence_and_missing_values(self) -> None:
+        for secret, environment, expected in (
+            ("secret-key", "environment-key", "secret-key"),
+            (None, " environment-key ", "environment-key"),
+            (None, "", None),
+            ("YOUR_OPENALEX_API_KEY", "", None),
+            (None, "null", None),
+        ):
+            with (
+                self.subTest(secret=secret, environment=environment),
+                patch.object(app_module, "get_secret_text", return_value=secret),
+                patch.dict(os.environ, {"OPENALEX_API_KEY": environment}),
+            ):
+                self.assertEqual(app_module.resolve_openalex_api_key(), expected)
+
+    def test_key_required_only_for_openalex_and_excluded_from_results(self) -> None:
+        missing = make_selection(model="skip", openalex_api_key=None)
+        errors = app_module.query_configuration_errors(missing)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("openalex_api_key", errors[0])
+        self.assertEqual(
+            app_module.query_configuration_errors(
+                make_selection(model="skip", include_openalex=False, openalex_api_key=None)
+            ), []
+        )
+        configured = make_selection(model="skip")
+        self.assertEqual(app_module.query_configuration_errors(configured), [])
+        self.assertNotIn("test-openalex-key", repr(configured))
+        self.assertNotIn("test-openalex-key", repr(app_module.build_query_params(configured)))
+
+    def test_authentication_notice_is_scoped_to_openalex(self) -> None:
+        for status in (401, 403):
+            response = requests.Response()
+            response.status_code = status
+            response.url = "https://api.openalex.org/works?api_key=never-display-this"
+            error = requests.HTTPError("never-display-this", response=response)
+            level, message = app_module.fetch_terminal_notice(error)
+            self.assertEqual(level, "error")
+            self.assertIn("openalex_api_key", message)
+            self.assertIn("verified email", message)
+            self.assertNotIn("never-display-this", message)
+            response.url = "https://share.swps.edu.pl/server/api"
+            self.assertEqual(
+                app_module.fetch_terminal_notice(error),
+                ("error", "Request failed: never-display-this"),
+            )
+
+    def test_lineage_lookup_receives_key(self) -> None:
+        selection = make_selection(include_lineage=True)
+        stats = FetchStats(0, 0, 0, 0, 0)
+        with (
+            patch.object(app_module, "fetch_institution_lineage", return_value=[]) as lineage,
+            patch.object(app_module, "fetch_publications_with_sdg", return_value=([], stats)),
+        ):
+            app_module.execute_publication_fetch(
+                selection, progress_callback=Mock(), cancel_check=lambda: False,
+            )
+        self.assertEqual(lineage.call_args.kwargs["openalex_api_key"], "test-openalex-key")
+
+    def test_swps_selection_explains_missing_key_before_fetch(self) -> None:
+        with patch.dict(os.environ, {"OPENALEX_API_KEY": ""}):
+            app = AppTest.from_file("app.py")
+            app.secrets["http_user_agent"] = "Fetcher (mailto:researcher@university.edu)"
+            app.secrets["openalex_api_key"] = ""
+            app.run(timeout=30)
+            app.multiselect[0].set_value(["openalex", "dspace:swps-share"])
+            app.run(timeout=30)
+            self.assertEqual(list(app.exception), [])
+            self.assertTrue(any("openalex_api_key" in error.value for error in app.error))
+            fetch = next(button for button in app.button if button.label == "Fetch works and build CSV")
+            self.assertTrue(fetch.disabled)
 
 
 class AppStateTests(unittest.TestCase):
@@ -390,6 +468,8 @@ class AppStateTests(unittest.TestCase):
 
         self.assertEqual(payload["rows"], rows)
         self.assertEqual(payload["params"], app_module.build_query_params(selection))
+        self.assertEqual(fetch.call_args.kwargs["openalex_api_key"], "test-openalex-key")
+        self.assertNotIn("test-openalex-key", repr(payload))
         self.assertEqual(
             fetch.call_args.kwargs["aurora_base_url"],
             "https://aurora.example/classify",

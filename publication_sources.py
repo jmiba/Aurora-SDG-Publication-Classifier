@@ -20,7 +20,7 @@ import requests
 from request_utils import request_with_backoff
 
 OPENALEX_WORKS_URL = "https://api.openalex.org/works"
-OPENALEX_PER_PAGE = 200
+OPENALEX_PER_PAGE = 100
 DSpaceProgressHook = Optional[Callable[[str], None]]
 CancelCheck = Optional[Callable[[], bool]]
 OPEN_OA_STATUSES = {"diamond", "gold", "hybrid", "green", "bronze", "open"}
@@ -1049,6 +1049,7 @@ def fetch_openalex_records(
     filter_value: str,
     work_type: WorkTypeSelection,
     user_agent: str,
+    openalex_api_key: Optional[str] = None,
     limit_rows: Optional[int] = None,
     progress_callback: DSpaceProgressHook = None,
     cancel_check: CancelCheck = None,
@@ -1065,6 +1066,8 @@ def fetch_openalex_records(
         "cursor": "*",
     }
     headers = {"User-Agent": user_agent}
+    if openalex_api_key:
+        headers["Authorization"] = f"Bearer {openalex_api_key}"
     records: List[Dict[str, Any]] = []
     total_expected: Optional[int] = None
     while params.get("cursor"):

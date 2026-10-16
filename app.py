@@ -3,9 +3,10 @@ import io
 import itertools
 import json
 import math
+import os
 import re
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 from typing import (
@@ -57,6 +58,7 @@ from publication_sources import (
 )
 
 SECRET_HTTP_USER_AGENT = "http_user_agent"
+SECRET_OPENALEX_API_KEY = "openalex_api_key"
 SECRET_AURORA_BASE_URL = "aurora_base_url"
 SECRET_SEMANTIC_SCHOLAR_KEY = "semantic_scholar_api_key"
 SECRET_GOOGLE_SCHOLAR_ENABLED = "google_scholar_enabled"
@@ -188,6 +190,7 @@ class QuerySelection:
     aurora_base_url: Optional[str]
     oai_sources: Tuple[OaiPmhSource, ...] = ()
     llm_config: Optional[LlmConfig] = None
+    openalex_api_key: Optional[str] = field(default=None, repr=False)
 
 
 SDG_COLORS = {
@@ -300,6 +303,15 @@ def resolve_user_agent() -> Tuple[str, bool]:
     if secret_value:
         return secret_value.strip(), True
     return DEFAULT_USER_AGENT, False
+
+
+def resolve_openalex_api_key() -> Optional[str]:
+    """Read the OpenAlex key from secrets, then the deployment environment."""
+    value = get_secret_text(SECRET_OPENALEX_API_KEY) or os.environ.get("OPENALEX_API_KEY", "")
+    value = value.strip()
+    if value.lower() in {"", "none", "null", "your_openalex_api_key"}:
+        return None
+    return value
 
 
 def has_contact_user_agent(value: str) -> bool:
@@ -1596,10 +1608,11 @@ def render_institution_selector(user_agent: str) -> Tuple[Optional[str], bool]:
             with st.spinner("Searching institutions…"):
                 try:
                     search_results: Optional[List[dict]] = search_institutions_by_name(
-                        search_query.strip(), user_agent=user_agent
+                        search_query.strip(), user_agent=user_agent,
+                        openalex_api_key=resolve_openalex_api_key(),
                     )
                 except requests.HTTPError as exc:
-                    st.error(f"Institution search failed: {exc}")
+                    st.error(fetch_terminal_notice(exc)[1])
                     search_results = []
                 except requests.RequestException as exc:
                     st.error(f"Institution search error: {exc}")
@@ -1868,6 +1881,12 @@ def query_configuration_errors(selection: QuerySelection) -> List[str]:
             "OpenAlex fetches require `http_user_agent` in `.streamlit/secrets.toml` "
             "with a real contact email in `mailto:` form."
         )
+    if selection.include_openalex and not selection.openalex_api_key:
+        errors.append(
+            "OpenAlex cursor paging requires an API key. Set `openalex_api_key` in "
+            "`.streamlit/secrets.toml` or `OPENALEX_API_KEY` in the environment, "
+            "then restart the app. Get a free key at https://openalex.org/settings/api-key."
+        )
     if selection.model == "llm-independent" and selection.llm_config is None:
         errors.append(
             "Independent LLM comparison requires `llm_provider_base_url` and "
@@ -1965,6 +1984,18 @@ def fetch_terminal_notice(error: Exception) -> Tuple[str, str]:
     if isinstance(error, FetchCancelled):
         return "info", "Fetch cancelled."
     if isinstance(error, requests.HTTPError):
+        response = error.response
+        if (
+            response is not None
+            and response.status_code in {401, 403}
+            and urlparse(response.url or "").hostname == "api.openalex.org"
+        ):
+            return "error", (
+                f"OpenAlex authentication failed (HTTP {response.status_code}). "
+                "Cursor paging requires a valid API key with a verified email. "
+                "Check `openalex_api_key` in `.streamlit/secrets.toml` or "
+                "`OPENALEX_API_KEY` in the environment, then restart the app."
+            )
         return "error", f"Request failed: {error}"
     if isinstance(error, requests.RequestException):
         return "error", f"Network error: {error}"
@@ -1989,6 +2020,7 @@ def execute_publication_fetch(
                 else fetch_institution_lineage(
                     configured_id,
                     user_agent=selection.user_agent,
+                    openalex_api_key=selection.openalex_api_key,
                 )
             )
             for lineage_id in lineage_ids:
@@ -2009,6 +2041,7 @@ def execute_publication_fetch(
         to_date=selection.to_date,
         limit_rows=selection.limit_rows,
         user_agent=selection.user_agent,
+        openalex_api_key=selection.openalex_api_key,
         semantic_scholar_api_key=selection.semantic_scholar_api_key,
         enable_google_scholar=selection.google_scholar_enabled,
         serpapi_api_key=selection.serpapi_api_key,
@@ -2633,6 +2666,7 @@ def main() -> None:
         to_date=to_date_str,
         limit_rows=limit_rows,
         user_agent=user_agent,
+        openalex_api_key=resolve_openalex_api_key(),
         semantic_scholar_api_key=semantic_scholar_key,
         google_scholar_enabled=google_scholar_enabled,
         serpapi_api_key=serpapi_api_key,
