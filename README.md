@@ -167,7 +167,7 @@ the default local pipeline does not.
    ```bash
    pip install -r requirements-scholarly.txt
    ```
-4. **Configure sources and secrets**: Public DSpace endpoints live in `dspace_sources.toml`, and public OAI-PMH endpoints live in `oai_sources.toml`. Create `.streamlit/secrets.toml` for API keys and optional local datasource additions or overrides.
+4. **Configure sources and secrets**: Public DSpace endpoints live in `dspace_sources.toml`, and public OAI-PMH endpoints live in `oai_sources.toml`. Create `.streamlit/secrets.toml` using [the sample](.streamlit/secrets.sample.toml) for API keys and optional local datasource additions or overrides. OpenAlex fetches require both a contact `http_user_agent` and an `openalex_api_key` (or the `OPENALEX_API_KEY` environment variable); see the upgrade instructions below.
 5. **Run the app**:
    ```bash
    streamlit run app.py
@@ -175,6 +175,22 @@ the default local pipeline does not.
 6. **Use the interface**: Select one or more sources and one or more publication types. If OpenAlex is selected with a linked repository source, its configured institution is shown and used automatically. For an OpenAlex-only query, select an institution manually. Then choose the remaining options and press “Fetch works and build CSV.” Retrieval, deduplication and classification happen automatically.
 7. **Download your data**: After the fetch completes, you’ll see charts, a data preview, and buttons for Excel/CSV downloads.
    - Without a SerpApi key, Google Scholar lookups are skipped unless the optional `requirements-scholarly.txt` profile is installed.
+
+## Upgrading to 2.0.1
+
+This patch restores OpenAlex fetches that fail with **HTTP 401 Unauthorized** after the first page, including combined OpenAlex and SWPS SHARE queries. OpenAlex now requires an API key to follow a cursor beyond the first page.
+
+1. Get a free key from [OpenAlex settings](https://openalex.org/settings/api-key) and verify your account email.
+2. Add the key at the **top level** of `.streamlit/secrets.toml`, before any `[section]` or `[[source]]` headers:
+
+   ```toml
+   openalex_api_key = "YOUR_OPENALEX_API_KEY"
+   ```
+
+   Alternatively, set `OPENALEX_API_KEY` in the app process's environment. A configured secrets value takes precedence.
+3. Restart the Streamlit process or deployment so the updated code and credentials are loaded.
+
+The app reports missing credentials before starting a fetch and gives configuration guidance for OpenAlex HTTP 401/403 responses. Repository-only runs need no OpenAlex key. Existing SQLite data and classifier caches remain reusable.
 
 ## Development checks
 
@@ -324,8 +340,7 @@ A complete local template, including an optional DSpace entry, is provided in [`
 
 ## Release history
 
-See [CHANGELOG.md](CHANGELOG.md) for versioned changes. The first stable release
-is `1.0.0`.
+The current release is [2.0.1](https://github.com/jmiba/Aurora-SDG-Publication-Classifier/releases/tag/2.0.1), which adds OpenAlex authentication support and fixes current SDG identifier handling. See [CHANGELOG.md](CHANGELOG.md) for versioned changes. The first stable release is `1.0.0`.
 
 ## License
 

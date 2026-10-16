@@ -5,6 +5,25 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.1] - 2026-10-16
+
+### Fixed
+
+- Restore OpenAlex cursor pagination after the first page by accepting `openalex_api_key` from Streamlit secrets or `OPENALEX_API_KEY` from the environment. This also fixes HTTP 401 failures when OpenAlex is queried alongside SWPS SHARE.
+- Pass the key in an Authorization bearer header for works, institution searches, and lineage lookups, without including it in query URLs, result parameters, exports, or repository requests.
+- Block OpenAlex fetches when the key is missing and show configuration guidance for OpenAlex HTTP 401/403 responses.
+- Accept current UN metadata SDG identifiers alongside legacy OpenAlex identifiers so valid current assignments populate `openalex_sdgs` correctly.
+
+### Changed
+
+- Use OpenAlex's supported 100-record page size instead of the deprecated 200-record size.
+- Document API-key setup, email verification, deployment environment configuration, and restart requirements.
+
+### Migration
+
+- Get a free OpenAlex API key, verify its account email, and set `openalex_api_key` at the top level of `.streamlit/secrets.toml` or `OPENALEX_API_KEY` in the app process's environment. Restart the app or deployment after upgrading.
+- Repository-only queries require no OpenAlex key. Existing SQLite data, classifier caches, and export schemas are preserved.
+
 ## [2.0.0] - 2026-10-08
 
 ### Changed
@@ -243,7 +262,8 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   tracked source tree.
 - Required a non-placeholder contact address before OpenAlex queries can run.
 
-[Unreleased]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/2.0.0...HEAD
+[Unreleased]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/2.0.1...HEAD
+[2.0.1]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/2.0.0...2.0.1
 [2.0.0]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/0.1.9...2.0.0
 [1.1.9]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/releases/tag/0.1.9
 [1.1.8]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/1.1.7...1.1.8

@@ -16,6 +16,8 @@ The app entry point is [[app.py#main]], which configures the page, resolves secr
 
 Version 2.0.0 promotes the local OpenAlex method to the default. This changes primary export response shape and empty-result status; migration and release notes are maintained in `CHANGELOG.md`. SQLite data is preserved, while schema version 8 invalidates earlier session results.
 
+Version 2.0.1 restores OpenAlex cursor paging with API-key configuration and uses the supported 100-record page size. It also fixes current SDG identifier compatibility. See [[sources#OpenAlex authentication]]; export schemas and classifier cache identities are unchanged.
+
 ## Secrets and configuration
 
 Secrets are loaded once per process from Streamlit secrets, falling back to local TOML files, and are never shown in the UI.
