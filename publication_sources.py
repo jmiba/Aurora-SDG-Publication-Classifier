@@ -766,7 +766,8 @@ def normalize_openalex_work(work: Mapping[str, Any]) -> Dict[str, Any]:
         "title": work.get("display_name") or work.get("title") or "",
         "publication_date": work.get("publication_date") or "",
         "doi": f"https://doi.org/{doi_token}" if doi_token else "",
-        "type": work.get("type") or "",
+        # Keep the shared repository/export type while OpenAlex uses its own vocabulary.
+        "type": "proceedings-article" if work.get("type") == "conference-paper" else work.get("type") or "",
         "language": work.get("language") or "",
         "is_oa": open_access.get("is_oa"),
         "oa_status": open_access.get("oa_status") or "unknown",
@@ -1059,8 +1060,7 @@ def fetch_openalex_records(
         "filter": filter_value,
         "select": (
             "id,display_name,title,publication_date,doi,abstract_inverted_index,type,"
-            "language,open_access,authorships,sustainable_development_goals,"
-            "sustainable_development_goals_aurora"
+            "language,open_access,authorships,sustainable_development_goals"
         ),
         "per-page": OPENALEX_PER_PAGE,
         "cursor": "*",
@@ -1074,24 +1074,7 @@ def fetch_openalex_records(
         _ensure_not_cancelled(cancel_check)
         if progress_callback:
             progress_callback("Fetching OpenAlex records")
-        try:
-            data = _request_json(session, OPENALEX_WORKS_URL, params=params, headers=headers)
-        except requests.HTTPError as exc:
-            response = exc.response
-            if response is None or response.status_code != 400:
-                raise
-            try:
-                message = str(response.json().get("message") or "")
-            except (ValueError, AttributeError):
-                raise exc from None
-            if "sustainable_development_goals_aurora is not a valid select field" not in message:
-                raise
-            # OpenAlex says this frozen Aurora field will disappear in November 2026.
-            # Keep fetching its current SDGs; local Aurora handles the missing old field.
-            params["select"] = params["select"].replace(
-                ",sustainable_development_goals_aurora", ""
-            )
-            data = _request_json(session, OPENALEX_WORKS_URL, params=params, headers=headers)
+        data = _request_json(session, OPENALEX_WORKS_URL, params=params, headers=headers)
         meta = data.get("meta") or {}
         if total_expected is None:
             total_expected = meta.get("count") if isinstance(meta, Mapping) else None

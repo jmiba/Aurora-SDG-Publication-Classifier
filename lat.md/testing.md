@@ -40,3 +40,9 @@ Authenticated pagination keeps the bearer key on every page and out of query URL
 Configuration resolves secrets before the environment, requires a key only for OpenAlex runs, hides the key from result identities, and gives useful authentication guidance before or after a request fails.
 
 [[test_app.py#OpenAlexConfigurationTests]] covers key resolution, worker and lineage forwarding, host-scoped HTTP 401/403 notices, and the SWPS source selection showing the missing-key error with the fetch button disabled.
+
+## OpenAlex November 2026 schema compatibility
+
+Fetches omit the removed Aurora field on every page, keep current SDGs, translate conference-paper filters, and preserve the shared repository/export type without losing raw source metadata.
+
+[[test_publication_sources.py#PublicationSourceTests#test_current_openalex_schema_and_types_work_across_pages]] covers the affected institution/date query shape with default types, authenticated cursor continuation, and absent historical tags. Filter tests also verify alias deduplication and explicit rejection of the retired `proceedings` type; the app test verifies the updated conference-paper label and absence of the obsolete option.

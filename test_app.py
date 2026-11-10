@@ -606,6 +606,8 @@ class AppStateTests(unittest.TestCase):
         )
         self.assertIn("Artistic works", app.multiselect[1].options)
         self.assertIn("Software", app.multiselect[1].options)
+        self.assertIn("Conference papers / proceedings articles", app.multiselect[1].options)
+        self.assertNotIn("Proceedings", app.multiselect[1].options)
 
     def test_repository_sources_are_sorted_alphabetically(self) -> None:
         app = AppTest.from_file("app.py").run(timeout=30)

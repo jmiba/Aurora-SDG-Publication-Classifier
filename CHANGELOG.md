@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.2] - 2026-11-10
+
+### Fixed
+
+- Stop requesting the legacy OpenAlex Aurora SDG field removed on 2 November 2026. The previous compatibility retry only recognized the older invalid-field error message and missed the removal notice.
+- Translate the shared `proceedings-article` selection to OpenAlex's current `conference-paper` type and remove the unsupported `proceedings` option, which otherwise caused a second HTTP 400 after the field error was fixed.
+- Normalize OpenAlex conference-paper records to the existing repository/export type while preserving the original type in raw metadata. Current OpenAlex SDGs, default local classification, and legacy Aurora API/cache fallback remain available.
+
+### Migration
+
+- Restart the Streamlit process or deployment after upgrading to load the updated OpenAlex requests. Existing API-key configuration, SQLite data, export schemas, and classifier caches remain valid.
+
 ## [2.0.1] - 2026-10-16
 
 ### Fixed
@@ -262,7 +274,8 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   tracked source tree.
 - Required a non-placeholder contact address before OpenAlex queries can run.
 
-[Unreleased]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/2.0.1...HEAD
+[Unreleased]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/2.0.2...HEAD
+[2.0.2]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/2.0.1...2.0.2
 [2.0.1]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/2.0.0...2.0.1
 [2.0.0]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/0.1.9...2.0.0
 [1.1.9]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/releases/tag/0.1.9

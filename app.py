@@ -148,7 +148,7 @@ CSV_FIELDNAMES = [
 ]
 RESULT_SESSION_KEY = "fetch_result"
 RESULT_SCHEMA_VERSION = 8
-APP_VERSION = "2.0.1"
+APP_VERSION = "2.0.2"
 APP_NAME = "Publication SDG Classifier"
 APP_REPOSITORY_URL = "https://github.com/jmiba/Aurora-SDG-Publication-Classifier"
 MAX_EXPORT_FILENAME_LENGTH = 150
@@ -1751,7 +1751,7 @@ def render_publication_type_selector(
         "book-chapter": "Book chapters",
         "artistic-work": "Artistic works",
         "software": "Software",
-        "proceedings-article": "Proceedings articles",
+        "proceedings-article": "Conference papers / proceedings articles",
         "reference-entry": "Reference entries",
         "preprint": "Preprints",
     }

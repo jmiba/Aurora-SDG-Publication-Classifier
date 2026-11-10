@@ -61,12 +61,12 @@ OPENALEX_SDG_THRESHOLD = 0.4
 AURORA_FALLBACK_CACHE_MODEL = "aurora-sdg-multi:openalex-0.4-v1"
 DEFAULT_FROM_DATE = "2023-01-01"
 DEFAULT_USER_AGENT = "Aurora-SDG-Publication-Classifier"
+# Shared app type IDs; make_filter translates conference papers to OpenAlex's vocabulary.
 OPENALEX_WORK_TYPES = (
     "article",
     "book",
     "book-chapter",
     "proceedings-article",
-    "proceedings",
     "reference-entry",
     "report",
     "dissertation",
@@ -504,8 +504,16 @@ def make_filter(
         parts.append(f"to_publication_date:{to_date}")
     if work_type:
         selected_types = [work_type] if isinstance(work_type, str) else list(work_type)
+        if "proceedings" in {str(value).strip() for value in selected_types}:
+            raise ValueError(
+                "OpenAlex no longer supports the 'proceedings' work type. "
+                "Choose conference papers / proceedings articles instead."
+            )
         selected_types = list(
-            dict.fromkeys(str(value).strip() for value in selected_types if str(value).strip())
+            dict.fromkeys(
+                "conference-paper" if str(value).strip() == "proceedings-article" else str(value).strip()
+                for value in selected_types if str(value).strip()
+            )
         )
         if selected_types:
             parts.append(f"type:{'|'.join(selected_types)}")

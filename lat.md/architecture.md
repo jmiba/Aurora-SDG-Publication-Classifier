@@ -18,6 +18,8 @@ Version 2.0.0 promotes the local OpenAlex method to the default. This changes pr
 
 Version 2.0.1 restores OpenAlex cursor paging with API-key configuration and uses the supported 100-record page size. It also fixes current SDG identifier compatibility. See [[sources#OpenAlex authentication]]; export schemas and classifier cache identities are unchanged.
 
+Version 2.0.2 handles the November 2026 OpenAlex schema changes: requests omit the removed Aurora field and translate conference-paper types at the source boundary. See [[sources#Fetching]] and [[testing#OpenAlex November 2026 schema compatibility]]; existing exports and classifier caches remain compatible.
+
 ## Secrets and configuration
 
 Secrets are loaded once per process from Streamlit secrets, falling back to local TOML files, and are never shown in the UI.

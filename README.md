@@ -83,6 +83,10 @@ graph TD
 
 OpenAlex SDG metadata accepts both current UN identifiers (`https://metadata.un.org/sdg/N`) and legacy OpenAlex identifiers (`https://openalex.org/sdgs/N`). Valid assignments populate `openalex_sdgs` with status `classified`; an empty list yields `no_sdg`, while missing or malformed metadata yields `unavailable`.
 
+OpenAlex removed `sustainable_development_goals_aurora` on 2 November 2026. Fetches request only the current `sustainable_development_goals` field; the historical Aurora export columns remain for compatibility and report `unavailable` on new records. The default local classifier continues to supply primary scores, while explicit legacy Aurora modes use their existing API/cache fallback. See [OpenAlex's removal notice](https://help.openalex.org/api/deprecations/).
+
+The **Conference papers / proceedings articles** selection sends `type:conference-paper` to OpenAlex and retains `proceedings-article` as the shared repository/export type. The rejected `type:proceedings` option is no longer offered for OpenAlex. Raw OpenAlex metadata retains its original type. See the [current OpenAlex work types](https://help.openalex.org/data/work-types/).
+
 ## Released OpenAlex pipeline
 
 The default **OpenAlex pipeline (local, default)** runs
@@ -175,6 +179,12 @@ the default local pipeline does not.
 6. **Use the interface**: Select one or more sources and one or more publication types. If OpenAlex is selected with a linked repository source, its configured institution is shown and used automatically. For an OpenAlex-only query, select an institution manually. Then choose the remaining options and press “Fetch works and build CSV.” Retrieval, deduplication and classification happen automatically.
 7. **Download your data**: After the fetch completes, you’ll see charts, a data preview, and buttons for Excel/CSV downloads.
    - Without a SerpApi key, Google Scholar lookups are skipped unless the optional `requirements-scholarly.txt` profile is installed.
+
+## Upgrading to 2.0.2
+
+This patch fixes OpenAlex HTTP 400 errors caused by the November 2026 removal of the legacy Aurora SDG field and rejection of obsolete proceedings type values. Conference-paper queries use the current OpenAlex vocabulary while repository records and exports retain their shared type format.
+
+Restart the Streamlit process or deployment after upgrading. Existing API-key configuration, SQLite data, export schemas, and classifier caches remain valid. For installations upgrading from before 2.0.1, also complete the API-key setup below.
 
 ## Upgrading to 2.0.1
 
@@ -340,7 +350,7 @@ A complete local template, including an optional DSpace entry, is provided in [`
 
 ## Release history
 
-The current release is [2.0.1](https://github.com/jmiba/Aurora-SDG-Publication-Classifier/releases/tag/2.0.1), which adds OpenAlex authentication support and fixes current SDG identifier handling. See [CHANGELOG.md](CHANGELOG.md) for versioned changes. The first stable release is `1.0.0`.
+The current release is [2.0.2](https://github.com/jmiba/Aurora-SDG-Publication-Classifier/releases/tag/2.0.2), which restores publication fetching after the November 2026 OpenAlex schema changes. See [CHANGELOG.md](CHANGELOG.md) for versioned changes. The first stable release is `1.0.0`.
 
 ## License
 

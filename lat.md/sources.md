@@ -16,7 +16,7 @@ Source entries come from the tracked TOML registries (`dspace_sources.toml`, `oa
 
 Each adapter maps its native shape into the same keys so downstream enrichment and export are source-agnostic.
 
-- [[publication_sources.py#normalize_openalex_work]] — OpenAlex work to contract; reconstructs the abstract from `abstract_inverted_index` via [[publication_sources.py#_reconstruct_openalex_abstract]] and keeps temporary Aurora tags separate from current OpenAlex SDGs.
+- [[publication_sources.py#normalize_openalex_work]] — OpenAlex work to contract; reconstructs the abstract from `abstract_inverted_index` via [[publication_sources.py#_reconstruct_openalex_abstract]], keeps archived Aurora tags separate from current SDGs, and maps `conference-paper` to the shared `proceedings-article` type while preserving raw metadata.
 - [[publication_sources.py#normalize_dspace_object]] — DSpace search object to contract; abstract via [[publication_sources.py#_abstract_from_metadata]], OA via [[publication_sources.py#_dspace_oa]].
 - [[publication_sources.py#normalize_oai_record]] — OAI-PMH Dublin Core record to contract; type via [[publication_sources.py#_oai_type]], OA via [[publication_sources.py#_oai_oa]], record URL via [[publication_sources.py#_oai_record_url]].
 - [[publication_sources.py#normalize_hal_document]] — HAL Search API document to contract; type via [[publication_sources.py#_hal_type]].
@@ -26,10 +26,12 @@ Each adapter maps its native shape into the same keys so downstream enrichment a
 
 Each adapter paginates its native API, applies local type/date filtering where the API cannot, and respects cancellation and row limits.
 
-- [[publication_sources.py#fetch_openalex_records]] — cursor-paginated OpenAlex works with current SDGs and temporary Aurora tags. If OpenAlex removes the old select field, retry without it so local Aurora can provide the primary result.
+- [[publication_sources.py#fetch_openalex_records]] — cursor-paginated OpenAlex works with current SDGs. The Aurora field removed on 2 November 2026 is never requested; default local classification and explicit legacy Aurora API/cache fallback handle new records without those historical tags.
 - [[publication_sources.py#fetch_dspace_records]] — paginated DSpace REST search per entity type.
 - [[publication_sources.py#fetch_oai_records]] — OAI-PMH `ListRecords` with resumption-token paging and a local publication-date filter; XML is parsed safely via [[publication_sources.py#_request_xml]] (size cap and DOCTYPE/ENTITY guard). The first page request sends the selected period start as the OAI-PMH `from` parameter to prune unchanged old records server-side (per-source `send_from` opt-out); `until` is never sent because datestamps, not `dc:date`, are filtered, so the local date filter remains authoritative.
 - [[publication_sources.py#fetch_hal_records]] — HAL Search API paging with Solr date-range filtering.
+
+[[openalex_sdg.py#make_filter]] translates the shared `proceedings-article` selection to `conference-paper` for OpenAlex and deduplicates equivalent selections. The unsupported `proceedings` type is absent from [[openalex_sdg.py#OPENALEX_WORK_TYPES]] and is rejected explicitly if passed directly to the filter builder. Repository adapters retain their existing vocabulary.
 
 ## OpenAlex authentication
 

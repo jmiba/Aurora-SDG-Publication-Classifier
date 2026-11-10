@@ -218,40 +218,48 @@ class PublicationSourceTests(unittest.TestCase):
             base_url="https://repo.example/server/api",
         )
 
-    def test_openalex_fetch_requests_both_sdg_fields(self) -> None:
+    def test_openalex_fetch_requests_only_current_sdg_field(self) -> None:
         session = FakeSession([{"meta": {"count": 0}, "results": []}])
         fetch_openalex_records(
             session, filter_value="institutions.id:I1", work_type="article", user_agent="test",
         )
         selected = session.calls[0]["params"]["select"].split(",")
         self.assertIn("sustainable_development_goals", selected)
-        self.assertIn("sustainable_development_goals_aurora", selected)
+        self.assertNotIn("sustainable_development_goals_aurora", selected)
         self.assertNotIn("x_sdgs", selected)
 
-    def test_openalex_fetch_retries_if_temporary_aurora_field_is_removed(self) -> None:
-        response = requests.Response()
-        response.status_code = 400
-        response._content = (
-            b'{"message":"sustainable_development_goals_aurora is not a valid select field"}'
+    # @lat: [[testing#OpenAlex November 2026 schema compatibility]]
+    def test_current_openalex_schema_and_types_work_across_pages(self) -> None:
+        current_sdgs = [{"id": "https://metadata.un.org/sdg/13", "score": 0.8}]
+        session = FakeSession([
+            {"meta": {"count": 2, "next_cursor": "next"}, "results": [
+                {"id": "https://openalex.org/W1", "type": "conference-paper",
+                 "sustainable_development_goals": current_sdgs},
+            ]},
+            {"meta": {"count": 2, "next_cursor": None}, "results": [
+                {"id": "https://openalex.org/W2", "type": "article"},
+            ]},
+        ])
+        filter_value = openalex_sdg.make_filter(
+            "I254029264", "2026-09-01", openalex_sdg.OPENALEX_WORK_TYPES, "2026-11-30",
         )
-        response.url = "https://api.openalex.org/works"
-        selections = []
-
-        def request_page(_session, _url, *, params, headers):
-            selections.append(params["select"])
-            if len(selections) == 1:
-                raise requests.HTTPError(response=response)
-            return {"meta": {"count": 0}, "results": []}
-
-        with patch("publication_sources._request_json", side_effect=request_page):
+        with patch("publication_sources.time.sleep"):
             records, count = fetch_openalex_records(
-                FakeSession([]), filter_value="institutions.id:I1",
-                work_type="article", user_agent="test",
+                session, filter_value=filter_value, work_type=openalex_sdg.OPENALEX_WORK_TYPES,
+                user_agent="test", openalex_api_key="test-key",
             )
-        self.assertEqual((records, count), ([], 0))
-        self.assertIn("sustainable_development_goals_aurora", selections[0])
-        self.assertNotIn("sustainable_development_goals_aurora", selections[1])
-        self.assertIn("sustainable_development_goals", selections[1])
+        self.assertEqual((len(records), count), (2, 2))
+        self.assertEqual(records[0]["type"], "proceedings-article")
+        self.assertEqual(records[0]["_raw_record"]["type"], "conference-paper")
+        self.assertEqual(records[0]["_openalex_sdgs"], current_sdgs)
+        self.assertIsNone(records[0]["_openalex_aurora_sdgs"])
+        self.assertEqual([call["params"]["cursor"] for call in session.calls], ["*", "next"])
+        for call in session.calls:
+            self.assertNotIn("sustainable_development_goals_aurora", call["params"]["select"])
+            self.assertIn("sustainable_development_goals", call["params"]["select"])
+            self.assertNotIn("proceedings", call["params"]["filter"])
+            self.assertIn("conference-paper", call["params"]["filter"])
+            self.assertEqual(call["headers"]["Authorization"], "Bearer test-key")
 
     def test_openalex_fetch_does_not_mask_other_bad_requests(self) -> None:
         response = requests.Response()
@@ -1159,6 +1167,15 @@ class PublicationSourceTests(unittest.TestCase):
             "2026-08-31",
         )
         self.assertIn("type:software", software_filter)
+
+    def test_openalex_conference_type_translation_deduplicates_and_rejects_retired_type(self) -> None:
+        filter_value = openalex_sdg.make_filter(
+            "I1", "2026-09-01", ["proceedings-article", "conference-paper", "article"],
+        )
+        self.assertIn("type:conference-paper|article", filter_value)
+        self.assertNotIn("proceedings", filter_value)
+        with self.assertRaisesRegex(ValueError, "no longer supports.*proceedings"):
+            openalex_sdg.make_filter("I1", "2026-09-01", "proceedings")
 
     def test_serpapi_rejects_similar_but_different_title(self) -> None:
         response = FakeResponse(
