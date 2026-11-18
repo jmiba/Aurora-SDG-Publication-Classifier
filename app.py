@@ -5,6 +5,7 @@ import json
 import math
 import os
 import re
+import socket
 import tomllib
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -148,7 +149,7 @@ CSV_FIELDNAMES = [
 ]
 RESULT_SESSION_KEY = "fetch_result"
 RESULT_SCHEMA_VERSION = 8
-APP_VERSION = "2.0.2"
+APP_VERSION = "2.0.3"
 APP_NAME = "Publication SDG Classifier"
 APP_REPOSITORY_URL = "https://github.com/jmiba/Aurora-SDG-Publication-Classifier"
 MAX_EXPORT_FILENAME_LENGTH = 150
@@ -1979,26 +1980,79 @@ def fetch_progress_fraction(
     return min(max(done / target, 0.0), 1.0)
 
 
+def _request_error_context(error: requests.RequestException) -> Tuple[str, bool]:
+    """Extract a safe host and detect DNS errors through nested transport wrappers."""
+    pending: List[Any] = [error]
+    seen: Set[int] = set()
+    host = None
+    dns_failure = False
+    while pending:
+        item = pending.pop()
+        if id(item) in seen:
+            continue
+        seen.add(id(item))
+        if not isinstance(item, BaseException):
+            continue
+        if isinstance(item, socket.gaierror) or type(item).__name__ == "NameResolutionError":
+            dns_failure = True
+        request = getattr(item, "request", None)
+        response = getattr(item, "response", None)
+        url = getattr(request, "url", None) or getattr(response, "url", None)
+        pool = vars(item).get("pool") or getattr(item, "conn", None)
+        candidate = urlparse(url).hostname if isinstance(url, str) else None
+        candidate = candidate or getattr(pool, "host", None) or getattr(item, "_host", None)
+        # Never show credentials, paths, queries, or arbitrary exception text.
+        if host is None and isinstance(candidate, str) and re.fullmatch(r"[a-zA-Z0-9.:-]+", candidate):
+            host = candidate
+        pending.extend(item.args)
+        pending.extend((item.__cause__, item.__context__, getattr(item, "reason", None)))
+    service = "OpenAlex (api.openalex.org)" if host == "api.openalex.org" else host
+    return service or "the remote service", dns_failure
+
+
 def fetch_terminal_notice(error: Exception) -> Tuple[str, str]:
-    """Convert worker exceptions into the existing user-facing error categories."""
+    """Explain failed fetches with actionable guidance and safe technical identifiers."""
     if isinstance(error, FetchCancelled):
         return "info", "Fetch cancelled."
-    if isinstance(error, requests.HTTPError):
-        response = error.response
-        if (
-            response is not None
-            and response.status_code in {401, 403}
-            and urlparse(response.url or "").hostname == "api.openalex.org"
-        ):
-            return "error", (
-                f"OpenAlex authentication failed (HTTP {response.status_code}). "
-                "Cursor paging requires a valid API key with a verified email. "
-                "Check `openalex_api_key` in `.streamlit/secrets.toml` or "
-                "`OPENALEX_API_KEY` in the environment, then restart the app."
-            )
-        return "error", f"Request failed: {error}"
     if isinstance(error, requests.RequestException):
-        return "error", f"Network error: {error}"
+        service, dns_failure = _request_error_context(error)
+        if isinstance(error, requests.HTTPError):
+            response = error.response
+            status = response.status_code if response is not None else None
+            if status in {401, 403} and service == "OpenAlex (api.openalex.org)":
+                return "error", (
+                    f"OpenAlex authentication failed (HTTP {status}). "
+                    "Cursor paging requires a valid API key with a verified email. "
+                    "Check `openalex_api_key` in `.streamlit/secrets.toml` or "
+                    "`OPENALEX_API_KEY` in the environment, then restart the app."
+                )
+            if status == 429:
+                message = f"{service} is limiting requests (HTTP 429). Wait a few minutes, then retry the fetch."
+            elif status is not None and status >= 500:
+                message = f"{service} reported a server error (HTTP {status}). Retry the fetch later."
+            elif status in {401, 403}:
+                message = f"Access to {service} was denied (HTTP {status}). Check the service credentials and access permissions."
+            else:
+                code = f" (HTTP {status})" if status is not None else ""
+                message = f"{service} rejected the request{code}. Check the selected source and query settings before retrying."
+            return "error", message
+        if isinstance(error, requests.exceptions.ProxyError):
+            message = f"Could not connect through the proxy to {service}. Check the proxy or VPN settings on the computer running the app, then retry."
+        elif dns_failure:
+            message = (
+                f"Could not find the internet address for {service} (DNS lookup failed). "
+                "The request could not reach the service. Check the internet connection, "
+                "DNS, and VPN or proxy settings on the computer running the app, then retry the fetch."
+            )
+        elif isinstance(error, requests.Timeout):
+            message = f"The request to {service} timed out. The service or connection may be slow. Retry the fetch in a moment."
+        elif isinstance(error, requests.exceptions.SSLError):
+            message = f"Could not establish a secure connection to {service} (TLS/SSL). Check the computer's clock, certificate setup, and VPN or proxy settings."
+        elif isinstance(error, requests.ConnectionError):
+            message = f"Could not connect to {service}. Check the internet connection and VPN or proxy settings on the computer running the app, then retry the fetch."
+        else:
+            message = f"The request to {service} could not be completed. Retry the fetch; if it persists, check the service configuration."
+        return "error", message
     if isinstance(error, ValueError):
         return "error", f"Source configuration or response error: {error}"
     return "error", f"Unexpected fetch error: {error}"

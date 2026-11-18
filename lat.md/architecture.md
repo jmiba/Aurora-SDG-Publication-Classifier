@@ -20,6 +20,8 @@ Version 2.0.1 restores OpenAlex cursor paging with API-key configuration and use
 
 Version 2.0.2 handles the November 2026 OpenAlex schema changes: requests omit the removed Aurora field and translate conference-paper types at the source boundary. See [[sources#Fetching]] and [[testing#OpenAlex November 2026 schema compatibility]]; existing exports and classifier caches remain compatible.
 
+Version 2.0.3 adds actionable, credential-free network and HTTP failure notices. See [[fetch-jobs#Fetch failure notices]] and [[testing#Comprehensible fetch failures]]; retry policy, caches, and exports are unchanged.
+
 ## Secrets and configuration
 
 Secrets are loaded once per process from Streamlit secrets, falling back to local TOML files, and are never shown in the UI.

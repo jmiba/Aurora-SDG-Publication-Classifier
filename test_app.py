@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import os
+import socket
 import threading
 import unittest
 from pathlib import Path
@@ -43,6 +44,59 @@ def make_selection(**overrides):
     }
     values.update(overrides)
     return app_module.QuerySelection(**values)
+
+
+# @lat: [[testing#Comprehensible fetch failures]]
+class FetchFailureNoticeTests(unittest.TestCase):
+    def test_wrapped_dns_failure_and_ui_notice(self) -> None:
+        from urllib3.connection import HTTPSConnection
+        from urllib3.connectionpool import HTTPSConnectionPool
+        from urllib3.exceptions import MaxRetryError, NameResolutionError
+
+        host = "api.openalex.org"
+        reason = NameResolutionError(host, HTTPSConnection(host), socket.gaierror(8, "unknown"))
+        wrapped = MaxRetryError(HTTPSConnectionPool(host), "/works?api_key=secret", reason)
+        error = requests.ConnectionError(wrapped)
+        level, message = app_module.fetch_terminal_notice(error)
+        self.assertEqual(level, "error")
+        self.assertIn("OpenAlex", message)
+        self.assertIn("DNS lookup failed", message)
+        self.assertIn("retry the fetch", message)
+        self.assertNotIn("secret", message)
+        self.assertNotIn("Max retries", message)
+        at = AppTest.from_string(
+            "import streamlit as st\n"
+            "from app import fetch_terminal_notice\n"
+            "level, message = fetch_terminal_notice(st.session_state['error'])\n"
+            "st.error(message)\n"
+        )
+        at.session_state["error"] = error
+        at.run(timeout=30)
+        self.assertFalse(at.exception)
+        self.assertIn(message, [element.value for element in at.error])
+
+    def test_transport_and_http_failures_have_specific_guidance(self) -> None:
+        request = requests.Request("GET", "https://repo.example/works?api_key=secret").prepare()
+        cases = [
+            (requests.Timeout("secret", request=request), "timed out"),
+            (requests.exceptions.SSLError("secret", request=request), "TLS/SSL"),
+            (requests.exceptions.ProxyError("secret", request=request), "proxy"),
+            (requests.ConnectionError("secret", request=request), "Could not connect"),
+            (requests.RequestException("secret"), "could not be completed"),
+        ]
+        for status, expected in ((429, "limiting requests"), (503, "server error"),
+                                 (400, "query settings")):
+            response = requests.Response()
+            response.status_code = status
+            response.url = request.url
+            cases.append((requests.HTTPError("secret", response=response), expected))
+        for error, expected in cases:
+            with self.subTest(error=type(error).__name__, expected=expected):
+                level, message = app_module.fetch_terminal_notice(error)
+                self.assertEqual(level, "error")
+                self.assertIn(expected, message)
+                self.assertNotIn("secret", message)
+                self.assertNotIn("api_key", message)
 
 
 # @lat: [[testing#OpenAlex authentication configuration]]
@@ -91,7 +145,8 @@ class OpenAlexConfigurationTests(unittest.TestCase):
             response.url = "https://share.swps.edu.pl/server/api"
             self.assertEqual(
                 app_module.fetch_terminal_notice(error),
-                ("error", "Request failed: never-display-this"),
+                ("error", "Access to share.swps.edu.pl was denied (HTTP "
+                 f"{status}). Check the service credentials and access permissions."),
             )
 
     def test_lineage_lookup_receives_key(self) -> None:

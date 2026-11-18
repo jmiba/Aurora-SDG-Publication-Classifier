@@ -87,6 +87,8 @@ OpenAlex removed `sustainable_development_goals_aurora` on 2 November 2026. Fetc
 
 The **Conference papers / proceedings articles** selection sends `type:conference-paper` to OpenAlex and retains `proceedings-article` as the shared repository/export type. The rejected `type:proceedings` option is no longer offered for OpenAlex. Raw OpenAlex metadata retains its original type. See the [current OpenAlex work types](https://help.openalex.org/data/work-types/).
 
+Fetch failures show a service name, an explanation, and a next step. DNS failures mean the app could not find the service's internet address; check connectivity, DNS, and VPN/proxy settings on the computer running the app, then retry. Timeouts, secure connection failures, access errors, rate limits, and server errors have separate guidance. Network notices omit full request URLs and credentials.
+
 ## Released OpenAlex pipeline
 
 The default **OpenAlex pipeline (local, default)** runs
@@ -350,7 +352,7 @@ A complete local template, including an optional DSpace entry, is provided in [`
 
 ## Release history
 
-The current release is [2.0.2](https://github.com/jmiba/Aurora-SDG-Publication-Classifier/releases/tag/2.0.2), which restores publication fetching after the November 2026 OpenAlex schema changes. See [CHANGELOG.md](CHANGELOG.md) for versioned changes. The first stable release is `1.0.0`.
+The current release is [2.0.3](https://github.com/jmiba/Aurora-SDG-Publication-Classifier/releases/tag/2.0.3), which explains network and HTTP fetch failures with practical recovery steps. See [CHANGELOG.md](CHANGELOG.md) for versioned changes. The first stable release is `1.0.0`.
 
 ## License
 

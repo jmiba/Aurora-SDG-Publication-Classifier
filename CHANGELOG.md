@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.3] - 2026-11-18
+
+### Changed
+
+- Explain fetch failures with the affected service and practical recovery steps for DNS lookups, timeouts, proxy and TLS connections, authentication, rate limits, and HTTP server errors.
+- Replace raw network exception strings with safe notices that omit full request URLs and credentials. Existing OpenAlex authentication guidance remains available.
+- Add regression coverage for nested DNS failures, transport and HTTP error categories, credential-free messages, and Streamlit notice rendering.
+
+### Migration
+
+- Restart the Streamlit process or deployment after upgrading. No dependency, configuration, cache, or export changes are required.
+
 ## [2.0.2] - 2026-11-10
 
 ### Fixed

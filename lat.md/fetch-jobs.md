@@ -12,3 +12,9 @@ The registry lives in a normally imported module (not `app.py`) because Streamli
 - [[fetch_jobs.py#discard_fetch_job]] — removes a completed job from the registry.
 
 The UI side (start button, cancel, and the polling fragment) is described in [[architecture#Fetch execution]].
+
+## Fetch failure notices
+
+[[app.py#fetch_terminal_notice]] translates network failures into service-specific explanations and recovery steps so users can retry or fix connectivity without interpreting transport exceptions.
+
+[[app.py#_request_error_context]] follows nested exception causes, arguments, and retry reasons to detect DNS failures and extract only a hostname. Notices distinguish proxy, DNS, timeout, TLS, connection, authentication, rate-limit, and HTTP server failures. Network exception strings and full URLs are not displayed, keeping query credentials out of notices. Existing retry and cancellation behavior is preserved.
