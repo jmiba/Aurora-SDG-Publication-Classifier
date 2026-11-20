@@ -143,6 +143,8 @@ processes, not containers that merely become unhealthy.
 The image was built and tested on Linux ARM64 through Docker Desktop. Streamlit
 health and app rendering, non-root secrets/volume access, volume persistence after
 container recreation, and one real offline CPU classification with the pinned
-model passed. The source test suite also passed. A Contabo deployment, Linux
-AMD64 execution, public HTTPS and live provider requests have not been tested by
-this change; perform the small first-fetch check on the VPS before wider use.
+model passed. The source test suite also passed. The Contabo Linux AMD64 deployment additionally
+passed real CPU inference, public HTTPS, whole-site password authentication
+(missing and incorrect credentials rejected), and authenticated WebSocket upgrade.
+Live publication-provider requests and a full browser fetch still need checking
+with a small query before wider use.

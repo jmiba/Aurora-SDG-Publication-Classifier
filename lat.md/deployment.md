@@ -33,3 +33,14 @@ Updates build before recreation, retain named volumes, and can retain a previous
 image for rollback. SQLite's backup API provides consistent backups while WAL is
 active. Image rollback does not roll back schema migrations; matching backups may
 be required. Existing dependency version ranges are preserved.
+
+## VPS qualification
+
+The Contabo AMD64 deployment validates CPU inference and authenticated Caddy access, while live publication-provider requests remain a separate end-to-end check.
+
+The deployment reuses the separate reverse-proxy project and frontend network.
+Whole-site Caddy authentication rejects unauthenticated and incorrect credentials
+for the root and health route, while valid credentials allow HTTP and WebSocket
+connections. Host secrets use root ownership and group 10001 read access (0640);
+initial login details are kept separately in an account-private file (0600).
+Only existing public HTTP/HTTPS ports are needed; port 8501 remains loopback-bound.
