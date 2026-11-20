@@ -1,0 +1,12 @@
+# Optional overlay for an existing containerized Caddy on the frontend network.
+services:
+  app:
+    networks:
+      default:
+      frontend:
+        aliases:
+          - publication-sdg
+
+networks:
+  frontend:
+    external: true

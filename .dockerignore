@@ -1,0 +1,24 @@
+# Allow only runtime inputs into the build context, never local secrets/cache.
+**
+!Dockerfile
+!requirements.txt
+!requirements-openalex-local.txt
+!app.py
+!cache_db.py
+!fetch_jobs.py
+!llm_sdg.py
+!openalex_local_sdg.py
+!openalex_sdg.py
+!publication_sources.py
+!request_utils.py
+!dspace_sources.toml
+!oai_sources.toml
+!.streamlit/
+.streamlit/**
+!.streamlit/config.toml
+!models/
+models/**
+!models/openalex-sdgs/
+!models/openalex-sdgs/LICENSE
+!models/openalex-sdgs/README.md
+!models/openalex-sdgs/sdg_jev_head_v2.json

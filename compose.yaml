@@ -1,0 +1,25 @@
+name: publication-sdg
+
+services:
+  app:
+    image: publication-sdg:${SDG_IMAGE_TAG:-local}
+    build:
+      context: .
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    ports:
+      - "127.0.0.1:8501:8501"
+    volumes:
+      - data:/data
+      - model-cache:/models
+      - type: bind
+        source: ./.streamlit/secrets.toml
+        target: /app/.streamlit/secrets.toml
+        read_only: true
+        bind:
+          create_host_path: false
+
+volumes:
+  data:
+  model-cache:

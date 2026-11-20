@@ -1,4 +1,4 @@
-"""Utility functions for fetching OpenAlex works and running Aurora SDG classification."""
+"""Publication fetching, abstract enrichment, and SDG classification utilities."""
 
 from __future__ import annotations
 
@@ -60,7 +60,7 @@ AURORA_MIN_INTERVAL_SECONDS = 0.12
 OPENALEX_SDG_THRESHOLD = 0.4
 AURORA_FALLBACK_CACHE_MODEL = "aurora-sdg-multi:openalex-0.4-v1"
 DEFAULT_FROM_DATE = "2023-01-01"
-DEFAULT_USER_AGENT = "Aurora-SDG-Publication-Classifier"
+DEFAULT_USER_AGENT = "Publication-SDG-Classifier"
 # Shared app type IDs; make_filter translates conference papers to OpenAlex's vocabulary.
 OPENALEX_WORK_TYPES = (
     "article",
@@ -79,7 +79,7 @@ OPENALEX_WORK_TYPES = (
     "other",
 )
 
-AURORA_MODELS = [
+SDG_PROCESSING_OPTIONS = [
     ("openalex-local", "OpenAlex pipeline (local, default)"),
     ("aurora-sdg-multi", "Legacy Aurora (available OpenAlex tags or API fallback)"),
     ("llm-independent", "Independent LLM + legacy Aurora comparison"),
@@ -1350,7 +1350,7 @@ def fetch_works_with_sdg(
 
 
 __all__ = [
-    "AURORA_MODELS",
+    "SDG_PROCESSING_OPTIONS",
     "DEFAULT_FROM_DATE",
     "DEFAULT_USER_AGENT",
     "FetchCancelled",

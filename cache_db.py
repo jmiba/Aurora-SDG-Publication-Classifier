@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -11,7 +12,8 @@ from typing import Any, Dict, Mapping, Optional
 
 from publication_sources import publication_deduplication_key, reconcile_oa_pair
 
-DB_PATH = Path("cache.sqlite3")
+# @lat: [[deployment#Persistent runtime data]]
+DB_PATH = Path(os.environ.get("SDG_CACHE_PATH") or "cache.sqlite3")
 _LOCK = threading.RLock()
 _CONN: Optional[sqlite3.Connection] = None
 

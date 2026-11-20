@@ -8,7 +8,14 @@ The flow is [[architecture#Query configuration]] -> [[architecture#Fetch executi
 
 The app entry point is [[app.py#main]], which configures the page, resolves secrets and sources, renders the query controls, and branches between "idle", "fetch in progress", and "completed result" states.
 
-[[app.py#APP_NAME]] supplies the neutral Publication SDG Classifier title and browser-tab name. Selector labels explicitly identify retained Aurora behavior as legacy; the default is the released local OpenAlex pipeline. Legacy method/cache identities remain unchanged.
+[[app.py#APP_NAME]] supplies the neutral Publication SDG Classifier title and browser-tab name. Selector labels explicitly identify retained Aurora behavior as legacy; the default is the released local OpenAlex pipeline. The repository is `jmiba/publication-sdg-classifier`; [[app.py#APP_REPOSITORY_URL]]
+links there. [[openalex_sdg.py#SDG_PROCESSING_OPTIONS]] names the shared processing
+selector independently of any classifier. Default and sample HTTP identities use
+Publication SDG Classifier. Legacy method/cache identities remain unchanged.
+
+Aurora names are retained for real legacy services, metadata, exports and historical
+evaluations. The old Community Cloud demo is retired. The local directory may keep
+its existing name; Docker project/volume names remain stable across the rename.
 
 - [[app.py#APP_VERSION]] — version shown in the page caption and used in no other runtime path.
 - [[app.py#QuerySelection]] — frozen dataclass carrying query controls and resolved service credentials for one fetch run; only the non-secret identity produced by `build_query_params` is stored in completed results.

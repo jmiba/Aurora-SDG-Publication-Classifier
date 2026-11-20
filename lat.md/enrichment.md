@@ -1,6 +1,6 @@
 # Enrichment
 
-Per-publication abstract enrichment, OpenAlex-first Aurora classification, and optional independent LLM comparison, with caching and bounded concurrency.
+Per-publication abstract enrichment and local OpenAlex SDG classification, with optional legacy comparisons, caching and bounded concurrency.
 
 The entry point is the [[enrichment#Fetch pipeline]]; per-record work is [[enrichment#Per-publication enrichment]].
 

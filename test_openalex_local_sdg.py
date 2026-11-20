@@ -161,7 +161,7 @@ class LocalIntegrationTests(unittest.TestCase):
             self.assertIn("requirements-openalex-local", app.query_configuration_errors(selection)[0])
             ui = AppTest.from_file("app.py").run(timeout=30)
             selector = next(box for box in ui.selectbox if box.label == "Choose SDG processing")
-            index = next(i for i, (name, _) in enumerate(openalex_sdg.AURORA_MODELS)
+            index = next(i for i, (name, _) in enumerate(openalex_sdg.SDG_PROCESSING_OPTIONS)
                          if name == "openalex-local")
             self.assertEqual(selector.value, index)
             selector.set_value(index).run(timeout=30)

@@ -2,7 +2,7 @@
 
 ## Repository Purpose
 
-This repository contains a Streamlit application for exploring institution publications from OpenAlex, enriching missing abstracts, classifying them with Aurora SDG models, caching results locally in SQLite, and exporting CSV or XLSX outputs.
+This repository contains a Streamlit application for exploring institution publications from OpenAlex, enriching missing abstracts, classifying them with the local OpenAlex SDG pipeline by default, caching results locally in SQLite, and exporting CSV or XLSX outputs.
 
 ## Persistent Context
 

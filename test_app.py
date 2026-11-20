@@ -314,7 +314,7 @@ class AppStateTests(unittest.TestCase):
     def test_model_selector_uses_selected_index_when_descriptions_collide(self) -> None:
         models = [("first", "Same description"), ("second", "Same description")]
         with (
-            patch.object(app_module, "AURORA_MODELS", models),
+            patch.object(app_module, "SDG_PROCESSING_OPTIONS", models),
             patch.object(app_module.st, "subheader"),
             patch.object(app_module.st, "selectbox", return_value=1) as selectbox,
         ):
@@ -703,12 +703,12 @@ class AppStateTests(unittest.TestCase):
             model_box = next(
         box for box in app.selectbox if box.label == "Choose SDG processing"
             )
-            # Index of the "skip" entry in AURORA_MODELS: keeps the run free
+            # Index of the "skip" entry in SDG_PROCESSING_OPTIONS: keeps the run free
             # of Aurora secret requirements in CI.
             model_box.set_value(
                 next(
                     i
-                    for i, (name, _) in enumerate(app_module.AURORA_MODELS)
+                    for i, (name, _) in enumerate(app_module.SDG_PROCESSING_OPTIONS)
                     if name == "skip"
                 )
             )

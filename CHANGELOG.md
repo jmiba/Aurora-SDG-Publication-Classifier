@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Use Publication SDG Classifier consistently in project descriptions, HTTP identity, and configuration examples, with `jmiba/publication-sdg-classifier` as the canonical repository.
+- Rename the shared processing selector constant to `SDG_PROCESSING_OPTIONS`; retain accurate Aurora labels for legacy services, exports, caches and historical comparisons.
+- Retire the old Community Cloud demo reference and document the Docker hosting workflow.
+- Clarify that `aurora_base_url` is optional for the default local OpenAlex pipeline.
+
 ## [2.0.3] - 2026-11-18
 
 ### Changed
@@ -286,18 +295,19 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   tracked source tree.
 - Required a non-placeholder contact address before OpenAlex queries can run.
 
-[Unreleased]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/2.0.2...HEAD
-[2.0.2]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/2.0.1...2.0.2
-[2.0.1]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/2.0.0...2.0.1
-[2.0.0]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/0.1.9...2.0.0
-[1.1.9]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/releases/tag/0.1.9
-[1.1.8]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/1.1.7...1.1.8
-[1.1.7]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/1.1.6...1.1.7
-[1.1.6]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/1.1.5...1.1.6
-[1.1.5]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/1.1.4...1.1.5
-[1.1.4]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/1.1.3...1.1.4
-[1.1.3]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/1.1.2...1.1.3
-[1.1.2]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/1.1.1...1.1.2
-[1.1.1]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/1.1.0...1.1.1
-[1.1.0]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/compare/1.0.0...1.1.0
-[1.0.0]: https://github.com/jmiba/Aurora-SDG-Publication-Classifier/releases/tag/1.0.0
+[Unreleased]: https://github.com/jmiba/publication-sdg-classifier/compare/2.0.3...HEAD
+[2.0.3]: https://github.com/jmiba/publication-sdg-classifier/compare/2.0.2...2.0.3
+[2.0.2]: https://github.com/jmiba/publication-sdg-classifier/compare/2.0.1...2.0.2
+[2.0.1]: https://github.com/jmiba/publication-sdg-classifier/compare/2.0.0...2.0.1
+[2.0.0]: https://github.com/jmiba/publication-sdg-classifier/compare/0.1.9...2.0.0
+[1.1.9]: https://github.com/jmiba/publication-sdg-classifier/releases/tag/0.1.9
+[1.1.8]: https://github.com/jmiba/publication-sdg-classifier/compare/1.1.7...1.1.8
+[1.1.7]: https://github.com/jmiba/publication-sdg-classifier/compare/1.1.6...1.1.7
+[1.1.6]: https://github.com/jmiba/publication-sdg-classifier/compare/1.1.5...1.1.6
+[1.1.5]: https://github.com/jmiba/publication-sdg-classifier/compare/1.1.4...1.1.5
+[1.1.4]: https://github.com/jmiba/publication-sdg-classifier/compare/1.1.3...1.1.4
+[1.1.3]: https://github.com/jmiba/publication-sdg-classifier/compare/1.1.2...1.1.3
+[1.1.2]: https://github.com/jmiba/publication-sdg-classifier/compare/1.1.1...1.1.2
+[1.1.1]: https://github.com/jmiba/publication-sdg-classifier/compare/1.1.0...1.1.1
+[1.1.0]: https://github.com/jmiba/publication-sdg-classifier/compare/1.0.0...1.1.0
+[1.0.0]: https://github.com/jmiba/publication-sdg-classifier/releases/tag/1.0.0

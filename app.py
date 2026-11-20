@@ -37,9 +37,9 @@ import openalex_local_sdg as local_sdg
 from fetch_jobs import discard_fetch_job, get_fetch_job, start_fetch_job
 from llm_sdg import MODEL_ID, LlmConfig
 from openalex_sdg import (
-    AURORA_MODELS,
     DEFAULT_USER_AGENT,
     OPENALEX_WORK_TYPES,
+    SDG_PROCESSING_OPTIONS,
     FetchCancelled,
     FetchStats,
     fetch_institution_lineage,
@@ -151,7 +151,7 @@ RESULT_SESSION_KEY = "fetch_result"
 RESULT_SCHEMA_VERSION = 8
 APP_VERSION = "2.0.3"
 APP_NAME = "Publication SDG Classifier"
-APP_REPOSITORY_URL = "https://github.com/jmiba/Aurora-SDG-Publication-Classifier"
+APP_REPOSITORY_URL = "https://github.com/jmiba/publication-sdg-classifier"
 MAX_EXPORT_FILENAME_LENGTH = 150
 SDG_THRESHOLD_PERCENT = 40.0
 FETCH_POLL_INTERVAL_SECONDS = 0.5
@@ -1771,14 +1771,14 @@ def render_publication_type_selector(
 def render_model_selector() -> str:
     """Let the user choose primary SDGs and optional LLM comparison."""
     st.subheader("4. SDG classification", divider="green")
-    default_index = next((i for i, (name, _) in enumerate(AURORA_MODELS) if name == "openalex-local"), 0)
+    default_index = next((i for i, (name, _) in enumerate(SDG_PROCESSING_OPTIONS) if name == "openalex-local"), 0)
     selected_index = st.selectbox(
         "Choose SDG processing",
-        options=range(len(AURORA_MODELS)),
+        options=range(len(SDG_PROCESSING_OPTIONS)),
         index=default_index,
-        format_func=lambda index: AURORA_MODELS[index][1],
+        format_func=lambda index: SDG_PROCESSING_OPTIONS[index][1],
     )
-    model = AURORA_MODELS[selected_index][0]
+    model = SDG_PROCESSING_OPTIONS[selected_index][0]
     if model == "openalex-local":
         st.caption(
             "Local OpenAlex classifier: downloads a 1.19 GB embedding model on first use. "

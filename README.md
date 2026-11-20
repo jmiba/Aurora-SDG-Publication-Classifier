@@ -2,7 +2,7 @@
 
 [![DOI](https://img.shields.io/badge/DOI-10.5281%2Fzenodo.22050496-blue)](https://doi.org/10.5281/zenodo.22050496)
 
-This Streamlit app explores publications from OpenAlex and configured DSpace or OAI-PMH repositories. It deduplicates records, enriches missing abstracts, classifies them with the released local OpenAlex pipeline by default, and exports results. Legacy Aurora and hosted LLM comparison remain selectable.
+This Streamlit app explores publications from OpenAlex and configured DSpace or OAI-PMH repositories. It deduplicates records, enriches missing abstracts, classifies them with the released local OpenAlex pipeline by default, and exports results. Optional legacy comparisons remain selectable.
 
 ## What you can do
 
@@ -12,7 +12,7 @@ This Streamlit app explores publications from OpenAlex and configured DSpace or 
 - **Harvest OAI-PMH sources**: Configure standard OAI-PMH endpoints through repeatable `[[oai_sources]]` entries. The Viadrina OPUS publication server is included as the initial source.
 - **Set filters**: Select one or more publication types, whether to run the optional hosted LLM comparison, a time window, and an optional record limit. Limited multi-source results are selected newest-first after deduplication rather than by source order.
 - **Deduplicate automatically**: Exact normalized DOI matches, or exact normalized title/year/first-author matches, are merged before enrichment and classification.
-- **Fetch SDG results**: The released local OpenAlex pipeline is the default and supplies primary scores and charts without an Aurora API fallback. Legacy Aurora and hosted LLM comparison are explicit alternatives. Publications and successful classifications are cached in `cache.sqlite3`.
+- **Fetch SDG results**: The released local OpenAlex pipeline is the default and supplies primary scores and charts. Optional legacy comparisons are explicit alternatives; see the compatibility notes below. Publications and successful classifications are cached in `cache.sqlite3`.
 - **Cancel long fetches**: Fetching runs outside Streamlit's script thread, so the live progress panel remains responsive and can cooperatively stop source, enrichment, and classification work.
 - **Enrich abstracts**: If all selected source records lack an abstract, the app can fall back to Semantic Scholar and Google Scholar.
 - **Inspect results instantly**: The “Preview” section shows 25 rows per page. Focus choices stay bounded to the current page or 100 title, author, and DOI search matches, and a selected row can drive the SDG chart.
@@ -31,9 +31,6 @@ Co-affiliation network visualization based on publication data.
 
 ![OA status of publication volume](image-2.png)
 OA status of publication volume over time.
-
-## Demo
-A live demo is available at [Streamlit Cloud - Aurora SDG Publicaton Classifier](https://aurora-sdg-publication-classifier.streamlit.app). Note that the demo instance may have usage limits and could be slower due to shared resources.
 
 ## High-level workflow
 
@@ -75,15 +72,13 @@ graph TD
 1. **Source fetch**: OpenAlex uses either the manually selected institution or the institution IDs linked to the selected repository sources, plus the lineage, date and selected publication types. Each selected DSpace API is queried independently with its configured Discovery profile, scope and applicable entity types. DSpace `Book` is queried only once when monographs, book chapters, or both are selected; `dc.type` metadata separates the returned records locally. With a result limit, DSpace deliberately collects up to that many candidates per entity type so the final newest-first, post-deduplication cap is not biased toward the first type queried. OAI-PMH sources are harvested with `ListRecords`, follow opaque `resumptionToken` values, skip deleted records, and normalize Dublin Core metadata. OAI-PMH `from` and `until` describe metadata-update dates rather than publication dates, so the app harvests the configured set and applies the selected publication period locally. When a record limit is set, OAI-PMH candidates are selected newest-first only after the complete harvest. Protocol failures returned by one OAI-PMH endpoint are reported for that source while other selected sources continue. Repository media and file URLs are not fetched.
 2. **Normalization and deduplication**: Source-qualified record IDs remain preserved while exact DOI or exact title/year/first-author matches become one canonical publication. Fuzzy similarity is not used for automatic merging.
 3. **Caching**: `source_records` preserves raw source responses, `canonical_works` stores merged publications, and `sdg_results_v2` stores classifications with the hash of the classified text. Cache updates preserve accumulated provenance and richer abstracts when a later query uses fewer sources. The legacy `works` and `sdg_results` tables remain intact and are copied additively on first use.
-4. **Enrichment and SDG classification**: Enriched title and abstract go to the released local OpenAlex pipeline by default. Successful classifications are reused by pinned model contract and source-text hash. No Aurora endpoint is used in this mode, including for empty or failed outputs. Selecting legacy Aurora or the independent LLM comparison retains the previous Aurora tag/API flow. Fetched current OpenAlex and legacy tags remain separately exported.
+4. **Enrichment and SDG classification**: Enriched title and abstract go to the released local OpenAlex pipeline by default. Successful classifications are reused by pinned model contract and source-text hash. Empty and failed outputs retain their distinct statuses. Optional legacy comparisons and archived source metadata remain separate; see the compatibility notes below.
 5. **Abstract enrichment**: DSpace abstracts are read from both `dc.abstract*` and standard `dc.description.abstract*` metadata; OAI-PMH abstracts come from `dc:description`, preferring an English description when one is present. The richer of current source text and cached text is reused before external fallbacks:
     - **Semantic Scholar**: Called via its official API using the paper's DOI. Requires an optional API key. If the API rejects configured credentials with HTTP 401 or 403, the app disables Semantic Scholar for the rest of that fetch, continues with other configured fallbacks, and shows a warning without exposing the key.
     - **Google Scholar**: Uses [SerpApi](https://serpapi.com/) when a key is provided; otherwise falls back to `scholarly` with free proxies (less reliable).
-6. **Exports**: CSV and XLSX include canonical IDs, source-qualified record IDs, source URLs, source counts and provenance. Primary `sdg_*` fields use `sdg_source=openalex_local` by default, with all 17 local scores and provenance in `sdg_response`. Explicit legacy modes instead use `sdg_source`: `openalex_aurora` for positive historical Aurora tags from OpenAlex, `aurora_recheck_openalex_empty` for an empty-list recheck, or `aurora_fallback` when those tags are unavailable. `openalex_aurora_response` and `openalex_aurora_status` retain the original Aurora field, including `[]` with status `empty`. `openalex_sdgs` and `openalex_sdgs_status` hold the current OpenAlex classifier's comparison result and distinguish an empty list from an unavailable field. `llm_*` fields hold the optional independent comparison; `llm_status=not_run` means it was not selected. The retired `x_sdgs` field is no longer requested or exported.
+6. **Exports**: CSV and XLSX include canonical IDs, source provenance, primary `sdg_*` scores, local model provenance, fetched `openalex_sdgs`, and optional `llm_*` comparisons. Historical export fields are retained for compatibility.
 
 OpenAlex SDG metadata accepts both current UN identifiers (`https://metadata.un.org/sdg/N`) and legacy OpenAlex identifiers (`https://openalex.org/sdgs/N`). Valid assignments populate `openalex_sdgs` with status `classified`; an empty list yields `no_sdg`, while missing or malformed metadata yields `unavailable`.
-
-OpenAlex removed `sustainable_development_goals_aurora` on 2 November 2026. Fetches request only the current `sustainable_development_goals` field; the historical Aurora export columns remain for compatibility and report `unavailable` on new records. The default local classifier continues to supply primary scores, while explicit legacy Aurora modes use their existing API/cache fallback. See [OpenAlex's removal notice](https://help.openalex.org/api/deprecations/).
 
 The **Conference papers / proceedings articles** selection sends `type:conference-paper` to OpenAlex and retains `proceedings-article` as the shared repository/export type. The rejected `type:proceedings` option is no longer offered for OpenAlex. Raw OpenAlex metadata retains its original type. See the [current OpenAlex work types](https://help.openalex.org/data/work-types/).
 
@@ -107,7 +102,7 @@ execution has not been qualified. Deployments without ML dependencies must expli
 
 The local classifier sends no publication text to an inference provider. It
 uses title and enriched abstract, retains the first 2,000 characters, and omits
-venue consistently. Existing abstract enrichment still applies. Aurora is not called in this mode. This is the released local scoring contract, whose behavior near
+venue consistently. Existing abstract enrichment still applies. This is the released local scoring contract, whose behavior near
 0.4 can differ slightly from OpenAlex's production rounding.
 
 Primary results and charts use the selected local pipeline. Preview and CSV/XLSX expose
@@ -119,8 +114,6 @@ cached by model contract and source-text hash. This comparison provides scores,
 not evidence quotations or a manual-review decision. It remains an experimental
 comparator pending reviewed ERUA accuracy evaluation.
 
-The app uses a neutral name; the selector explicitly labels retained Aurora
-behavior as legacy. The default is now the local OpenAlex pipeline. Aurora is used only when its legacy mode or the hosted LLM comparison is explicitly selected.
 
 Source-file watching is disabled in `.streamlit/config.toml` to prevent
 Streamlit from introspecting Transformers' lazy vision modules and emitting
@@ -136,18 +129,23 @@ The default local OpenAlex classifier reports `below_threshold` when no goal
 passes its 0.4 cutoff. `sdg_formatted` is then blank. This is a valid result,
 not a verified judgment that the publication is unrelated to every SDG. A
 `failed` status instead means no valid inference result was obtained; inspect
-`sdg_note`. Neither case triggers an Aurora fallback.
+`sdg_note`. Neither case triggers a fallback to another classifier.
 
-Explicit legacy Aurora modes retain their `no_sdg` status and recheck empty
-OpenAlex Aurora lists through the legacy API. They require `aurora_base_url`;
-the default local pipeline does not.
+
+## Host on a VPS with Docker
+
+The Docker Compose setup includes the CPU local classifier, persistent SQLite and
+model volumes, a read-only secrets mount, and an optional existing-Caddy network
+overlay. See [the deployment guide](DEPLOYMENT.md) for first start, HTTPS, backups,
+updates and rollback. Routine updates are `git pull --ff-only`,
+`sudo docker compose build --pull`, then `sudo docker compose up -d --wait`.
 
 ## Getting started
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/jmiba/Aurora-SDG-Publication-Classifier.git
-   cd Aurora-SDG-Publication-Classifier
+   git clone https://github.com/jmiba/publication-sdg-classifier.git
+   cd publication-sdg-classifier
    ```
 2. **Create a virtual environment (recommended)**
 
@@ -309,14 +307,14 @@ The app relies on Streamlit’s secrets mechanism for API keys and optional untr
 
 ```toml
 # Replace the reserved address below with a real contact email before using OpenAlex.
-http_user_agent = "Aurora-SDG-Publication-Classifier/1.0 (mailto:replace-me@your-institution.invalid)"
+http_user_agent = "Publication-SDG-Classifier/2.0 (mailto:replace-me@your-institution.invalid)"
 
 # Required when OpenAlex is selected (or set OPENALEX_API_KEY in the environment).
 # Get a free key at https://openalex.org/settings/api-key and verify your email.
 # openalex_api_key = "YOUR_OPENALEX_API_KEY"
 
-# Base URL for the Aurora fallback, required when SDG classification is enabled.
-aurora_base_url = "https://aurora-sdg.labs.vu.nl/classifier/classify"
+# Optional: only for legacy Aurora or LLM comparison modes.
+# aurora_base_url = "https://aurora-sdg.labs.vu.nl/classifier/classify"
 
 # For independent LLM classification, configure an HTTPS OpenAI-compatible API.
 # llm_provider_base_url = "https://your-provider.example/v1"
@@ -350,9 +348,34 @@ default_from_date = "2020-01-01"
 
 A complete local template, including an optional DSpace entry, is provided in [`.streamlit/secrets.sample.toml`](.streamlit/secrets.sample.toml).
 
+## Legacy compatibility and project history
+
+The project is now **Publication SDG Classifier**, hosted at
+[`jmiba/publication-sdg-classifier`](https://github.com/jmiba/publication-sdg-classifier).
+The previous repository name identified its original Aurora-based implementation.
+The old Community Cloud demo is retired; use the Docker deployment described above.
+
+Aurora remains named where it identifies an actual service, historical metadata,
+benchmark, cache identity, or export contract. Selecting legacy Aurora or the
+independent LLM comparison still enables that legacy primary classifier; neither
+is part of the default local OpenAlex pipeline. Legacy modes retain `no_sdg` for
+valid empty results and require `aurora_base_url` when using the API.
+
+Historical primary provenance values remain `openalex_aurora`,
+`aurora_recheck_openalex_empty`, and `aurora_fallback`.
+`openalex_aurora_response` and `openalex_aurora_status` preserve archived source
+metadata, including an empty list distinct from missing metadata. These names and
+cache identities are preserved so existing results remain interpretable.
+
+OpenAlex removed `sustainable_development_goals_aurora` on 2 November 2026. New
+fetches request only the current field and report historical metadata as
+`unavailable`. See [OpenAlex's removal notice](https://help.openalex.org/api/deprecations/).
+Historical changelog entries and evaluation comparisons retain their original
+method names. The rename does not migrate or rewrite cached publication data.
+
 ## Release history
 
-The current release is [2.0.3](https://github.com/jmiba/Aurora-SDG-Publication-Classifier/releases/tag/2.0.3), which explains network and HTTP fetch failures with practical recovery steps. See [CHANGELOG.md](CHANGELOG.md) for versioned changes. The first stable release is `1.0.0`.
+The current release is [2.0.3](https://github.com/jmiba/publication-sdg-classifier/releases/tag/2.0.3), which explains network and HTTP fetch failures with practical recovery steps. See [CHANGELOG.md](CHANGELOG.md) for versioned changes. The first stable release is `1.0.0`.
 
 ## License
 

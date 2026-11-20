@@ -50,3 +50,11 @@ Fetches omit the removed Aurora field on every page, keep current SDGs, translat
 ## Comprehensible fetch failures
 
 [[test_app.py#FetchFailureNoticeTests]] checks wrapped DNS errors, specific transport and HTTP recovery guidance, credential-free notices, and rendering the DNS explanation in the Streamlit interface.
+
+## Deployment cache persistence
+
+A custom database path creates its parent directory and preserves publication data across fresh processes, matching container replacement without accessing the developer's cache.
+
+`test_deployment.py` uses a temporary `SDG_CACHE_PATH`, writes in one subprocess,
+and reads in another. Container volume ownership, health, packaging and real ML
+inference additionally require a Docker smoke test; this unit test uses no network.
